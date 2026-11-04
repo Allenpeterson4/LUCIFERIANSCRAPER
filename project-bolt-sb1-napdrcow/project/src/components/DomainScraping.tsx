@@ -20,9 +20,12 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
-import { parseDomainsFromUrl } from "@/lib/parse";
+import { extractDomainDirectory, previewDomainDirectory, type DirectoryPreview } from "@/lib/parse";
 import type { DomainParsingRun, DomainParseResult, ParseDomainsResponse } from "@/lib/types";
+import type { ScrapeCampaignBatch } from "@/lib/types";
 import type { View } from "@/components/Header";
+import { HistoryView } from "@/components/HistoryView";
+import { KeywordSearchPanel } from "@/components/KeywordSearchPanel";
 
 interface ParsedDomain {
   domain: string;
@@ -34,13 +37,16 @@ interface ParsedDomain {
 interface DomainScrapingProps {
   onNavigate: (v: View) => void;
   onSendToScraper: (domains: string[]) => void;
+  onSendCampaign?: (batch: ScrapeCampaignBatch) => void;
 }
 
-export function DomainScraping({ onSendToScraper }: DomainScrapingProps) {
+export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapingProps) {
   const { session } = useAuth();
   const [url, setUrl] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadingAction, setLoadingAction] = useState<"preview" | "extract">("preview");
   const [error, setError] = useState<string | null>(null);
+  const [directoryPreview, setDirectoryPreview] = useState<DirectoryPreview | null>(null);
   const [parseResult, setParseResult] = useState<ParseDomainsResponse | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
@@ -49,6 +55,7 @@ export function DomainScraping({ onSendToScraper }: DomainScrapingProps) {
   const [historyLoading, setHistoryLoading] = useState(true);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [websiteHistoryOpen, setWebsiteHistoryOpen] = useState(false);
 
   useEffect(() => {
     loadHistory();
@@ -98,23 +105,43 @@ export function DomainScraping({ onSendToScraper }: DomainScrapingProps) {
     if (expandedRun === runId) setExpandedRun(null);
   };
 
-  const handleParse = async () => {
+  const handleFindDirectory = async () => {
     if (!url.trim()) {
-      setError("Please enter a URL.");
+      setError("Please enter a website domain.");
       return;
     }
     setError(null);
     setLoading(true);
+    setLoadingAction("preview");
+    setDirectoryPreview(null);
     setParseResult(null);
     setSelected(new Set());
 
     try {
-      const data = await parseDomainsFromUrl(url, session!.access_token);
+      const data = await previewDomainDirectory(url, session!.access_token);
+      setDirectoryPreview(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not locate a directory on this site.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleExtractDirectory = async () => {
+    if (!directoryPreview) return;
+    setError(null);
+    setLoading(true);
+    setLoadingAction("extract");
+
+    try {
+      const data = await extractDomainDirectory(url, directoryPreview.directory_url, session!.access_token);
       setParseResult(data);
       setSelected(new Set(data.domains.map((d) => d.domain)));
+      setDirectoryPreview(null);
+      window.dispatchEvent(new Event("credits-updated"));
       loadHistory();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to parse domains.");
+      setError(err instanceof Error ? err.message : "Failed to extract directory listings.");
     } finally {
       setLoading(false);
     }
@@ -175,15 +202,24 @@ export function DomainScraping({ onSendToScraper }: DomainScrapingProps) {
       <div className="mb-8">
         <h1 className="text-3xl font-bold mb-2">Domain Scraping</h1>
         <p className="text-neutral-600">
-          Paste a URL from an exhibition list or B2B marketplace. We'll parse the page,
-          extract all exhibitor or seller domains, and categorize them by industry.
+          Enter a trade show or B2B website domain. The scraper will locate validated exhibitor, participant, vendor, seller, or distributor directories before extracting anything.
         </p>
       </div>
+
+      <KeywordSearchPanel
+        destination="domain-listing"
+        onUseResult={(result) => {
+          setUrl(result.link);
+          setError(null);
+          setParseResult(null);
+          setSelected(new Set());
+        }}
+      />
 
       {/* URL Input */}
       <div className="bg-white rounded-2xl border border-neutral-200 p-6 mb-6">
         <label className="block text-sm font-medium text-neutral-700 mb-2">
-          Exhibition or B2B marketplace URL
+          Website domain or directory URL
         </label>
         <div className="flex flex-col sm:flex-row gap-3">
           <div className="flex-1 relative">
@@ -191,19 +227,19 @@ export function DomainScraping({ onSendToScraper }: DomainScrapingProps) {
             <input
               type="text"
               value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && !loading && handleParse()}
-              placeholder="https://example-trade-show.com/exhibitors"
+              onChange={(e) => { setUrl(e.target.value); setDirectoryPreview(null); setParseResult(null); }}
+              onKeyDown={(e) => e.key === "Enter" && !loading && handleFindDirectory()}
+              placeholder="example-trade-show.com"
               className="w-full pl-10 pr-4 py-3 rounded-lg border border-neutral-200 focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none transition-all font-mono text-sm"
             />
           </div>
           <button
-            onClick={handleParse}
+            onClick={handleFindDirectory}
             disabled={loading}
             className="flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-60 text-white font-medium px-6 py-3 rounded-lg transition-colors"
           >
             {loading ? <Loader2 size={18} className="animate-spin" /> : <Globe size={18} />}
-            {loading ? "Parsing..." : "Parse domains"}
+            {loading && loadingAction === "preview" ? "Finding directory..." : "Find directory"}
           </button>
         </div>
       </div>
@@ -218,11 +254,30 @@ export function DomainScraping({ onSendToScraper }: DomainScrapingProps) {
         </div>
       )}
 
+      {directoryPreview && !loading && (
+        <section className="mb-6 border border-primary-200 bg-primary-50/60 rounded-xl p-5 animate-fade-in">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <p className="text-sm font-semibold text-neutral-800">Directory found</p>
+              <p className="mt-1 text-2xl font-bold text-primary-700">{directoryPreview.total_listings.toLocaleString()} listings</p>
+              <p className="mt-2 break-all text-sm text-neutral-600">{directoryPreview.directory_url}</p>
+              <p className="mt-1 text-xs text-neutral-500">Extraction uses {directoryPreview.total_listings.toLocaleString()} credits, 1 per listing. Nothing is saved until you confirm.</p>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              <button onClick={() => setDirectoryPreview(null)} className="px-3 py-2 border border-neutral-200 bg-white rounded-lg text-sm font-medium">Cancel</button>
+              <button onClick={() => void handleExtractDirectory()} className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium">
+                <Globe size={15} />Extract listings
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
       {loading && (
         <div className="bg-white rounded-2xl border border-neutral-200 p-10 text-center animate-fade-in">
           <Loader2 size={36} className="animate-spin text-primary-600 mx-auto mb-4" />
-          <p className="font-medium text-neutral-700">Fetching and parsing the page...</p>
-          <p className="text-sm text-neutral-400 mt-1">Extracting exhibitor and seller domains.</p>
+          <p className="font-medium text-neutral-700">{loadingAction === "preview" ? "Searching this site for a directory..." : "Extracting confirmed listings..."}</p>
+          <p className="text-sm text-neutral-400 mt-1">Only validated exhibitor, participant, vendor, seller, and distributor listings are processed.</p>
         </div>
       )}
 
@@ -422,6 +477,12 @@ export function DomainScraping({ onSendToScraper }: DomainScrapingProps) {
           </div>
         )}
       </div>
+      <section className="mt-8 border-t border-neutral-200 pt-6">
+        <button onClick={() => setWebsiteHistoryOpen((open) => !open)} className="inline-flex items-center gap-2 px-4 py-2.5 border border-neutral-200 rounded-lg text-sm font-medium">
+          <Mail size={16} />{websiteHistoryOpen ? "Hide website scraper history" : "Website scraper history"}
+        </button>
+        {websiteHistoryOpen && <HistoryView sourceType="website" onSendCampaign={onSendCampaign} />}
+      </section>
     </div>
   );
 }

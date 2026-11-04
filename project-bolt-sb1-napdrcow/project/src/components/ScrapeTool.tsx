@@ -15,7 +15,9 @@ import {
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { scrapeDomains, type ScrapeResponseData } from "@/lib/scrape";
-import type { View } from "@/components/Header";
+import { HistoryView } from "@/components/HistoryView";
+import { KeywordSearchPanel } from "@/components/KeywordSearchPanel";
+import type { ScrapeCampaignBatch } from "@/lib/types";
 
 interface DomainResult {
   domain: string;
@@ -26,12 +28,12 @@ interface DomainResult {
 }
 
 interface ScrapeToolProps {
-  onNavigate: (v: View) => void;
   pendingDomains?: string[];
   onPendingConsumed?: () => void;
+  onSendCampaign?: (batch: ScrapeCampaignBatch) => void;
 }
 
-export function ScrapeTool({ onNavigate, pendingDomains, onPendingConsumed }: ScrapeToolProps) {
+export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }: ScrapeToolProps) {
   const { session } = useAuth();
   const [mode, setMode] = useState<"single" | "bulk">("single");
   const [singleDomain, setSingleDomain] = useState("");
@@ -42,6 +44,7 @@ export function ScrapeTool({ onNavigate, pendingDomains, onPendingConsumed }: Sc
   const [totalEmails, setTotalEmails] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState<string | null>(null);
+  const [websiteHistoryOpen, setWebsiteHistoryOpen] = useState(false);
 
   useEffect(() => {
     if (pendingDomains && pendingDomains.length > 0) {
@@ -50,6 +53,12 @@ export function ScrapeTool({ onNavigate, pendingDomains, onPendingConsumed }: Sc
       onPendingConsumed?.();
     }
   }, [pendingDomains, onPendingConsumed]);
+
+  useEffect(() => {
+    if (websiteHistoryOpen) {
+      document.getElementById("website-scrape-history")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [websiteHistoryOpen]);
 
   const parseDomains = (): string[] => {
     if (mode === "single") {
@@ -80,6 +89,7 @@ export function ScrapeTool({ onNavigate, pendingDomains, onPendingConsumed }: Sc
       setResults(data.results);
       setTotalEmails(data.total_emails);
       setExpanded(new Set(data.results.map((r) => r.domain)));
+      window.dispatchEvent(new Event("credits-updated"));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Scraping failed.");
     } finally {
@@ -121,15 +131,18 @@ export function ScrapeTool({ onNavigate, pendingDomains, onPendingConsumed }: Sc
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10 animate-fade-in">
       <div className="mb-8">
-        <h1 className="text-3xl font-bold mb-2">Scrape emails</h1>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <h1 className="text-3xl font-bold">Scrape emails</h1>
+        </div>
         <p className="text-neutral-600">
           Enter a domain or a list of domains. We'll crawl each one and extract every
-          reachable email address.
+          reachable email address. Each domain uses 1 credit.
         </p>
       </div>
 
       {/* Mode toggle */}
-      <div className="inline-flex p-1 bg-neutral-100 rounded-lg mb-6">
+      <div className="mb-6 flex flex-wrap items-center gap-2">
+        <div className="inline-flex p-1 bg-neutral-100 rounded-lg">
         <button
           onClick={() => setMode("single")}
           className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all ${
@@ -152,7 +165,24 @@ export function ScrapeTool({ onNavigate, pendingDomains, onPendingConsumed }: Sc
           <Layers size={16} />
           Bulk domains
         </button>
+        </div>
+        <button onClick={() => setWebsiteHistoryOpen((open) => !open)} className="inline-flex items-center gap-2 px-3 py-2 border border-neutral-200 bg-white rounded-lg text-sm font-medium">
+          <Inbox size={16} />{websiteHistoryOpen ? "Hide website history" : "Website scrape history"}
+        </button>
       </div>
+
+      <KeywordSearchPanel
+        destination="email-domain"
+        onUseResult={(result) => {
+          try {
+            setSingleDomain(new URL(result.link).hostname.replace(/^www\./, ""));
+            setMode("single");
+            setError(null);
+          } catch {
+            setError("This search result does not have a valid website address.");
+          }
+        }}
+      />
 
       {/* Input */}
       <div className="bg-white rounded-2xl border border-neutral-200 p-6 mb-6">
@@ -258,7 +288,7 @@ export function ScrapeTool({ onNavigate, pendingDomains, onPendingConsumed }: Sc
               </div>
             </div>
             <button
-              onClick={() => onNavigate("history")}
+              onClick={() => setWebsiteHistoryOpen(true)}
               className="text-sm font-medium text-primary-600 hover:text-primary-700 flex items-center gap-1.5"
             >
               View history
@@ -371,6 +401,7 @@ export function ScrapeTool({ onNavigate, pendingDomains, onPendingConsumed }: Sc
           )}
         </div>
       )}
+      {websiteHistoryOpen && <div id="website-scrape-history" className="mt-10 border-t border-neutral-200 pt-2"><HistoryView sourceType="website" onSendCampaign={onSendCampaign} /></div>}
     </div>
   );
 }

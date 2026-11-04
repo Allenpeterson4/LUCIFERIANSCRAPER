@@ -8,7 +8,6 @@ export interface SmtpConfig {
   encryption: string;
   from_email: string;
   from_name: string | null;
-  hourly_limit: number;
   is_active: boolean;
   created_at: string;
   updated_at: string;
@@ -19,6 +18,7 @@ export interface EmailMessage {
   user_id: string;
   subject: string;
   body: string;
+  format: "text" | "html";
   recipient_type: string;
   created_at: string;
   updated_at: string;

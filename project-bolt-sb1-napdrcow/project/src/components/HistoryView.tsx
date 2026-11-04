@@ -1,10 +1,8 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  History as HistoryIcon,
   Loader2,
   Trash2,
   Globe,
-  Mail,
   Layers,
   ChevronDown,
   ChevronRight,
@@ -14,14 +12,18 @@ import {
   Inbox,
   Calendar,
   Download,
+  Printer,
+  Send,
 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
-import { useAuth } from "@/lib/auth";
-import type { ScrapingRun, ScrapeResult } from "@/lib/types";
-import type { View } from "@/components/Header";
+import type { ScrapeCampaignBatch, ScrapingRun, ScrapeResult } from "@/lib/types";
 
-export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
-  const { user } = useAuth();
+interface HistoryViewProps {
+  sourceType: "website" | "maps";
+  onSendCampaign?: (batch: ScrapeCampaignBatch) => void;
+}
+
+export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
   const [runs, setRuns] = useState<ScrapingRun[]>([]);
   const [resultsByRun, setResultsByRun] = useState<Record<string, ScrapeResult[]>>({});
   const [loading, setLoading] = useState(true);
@@ -29,18 +31,23 @@ export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [dateFilter, setDateFilter] = useState("");
 
-  useEffect(() => {
-    loadRuns();
-  }, []);
-
-  const loadRuns = async () => {
+  const loadRuns = useCallback(async () => {
     setLoading(true);
     setError(null);
-    const { data, error: err } = await supabase
+    let query = supabase
       .from("scraping_runs")
       .select("*")
+      .eq("source_type", sourceType)
       .order("created_at", { ascending: false });
+    if (dateFilter) {
+      const start = new Date(`${dateFilter}T00:00:00`);
+      const end = new Date(start);
+      end.setDate(end.getDate() + 1);
+      query = query.gte("created_at", start.toISOString()).lt("created_at", end.toISOString());
+    }
+    const { data, error: err } = await query;
 
     if (err) {
       setError(err.message);
@@ -49,18 +56,21 @@ export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
     }
     setRuns((data as ScrapingRun[]) ?? []);
     setLoading(false);
-  };
+  }, [sourceType, dateFilter]);
+
+  useEffect(() => { void loadRuns(); }, [loadRuns]);
 
   const loadResults = async (runId: string) => {
-    if (resultsByRun[runId]) return;
-    const { data } = await supabase
+    if (resultsByRun[runId]) return resultsByRun[runId];
+    const { data, error: resultsError } = await supabase
       .from("scrape_results")
       .select("*")
       .eq("run_id", runId)
       .order("created_at", { ascending: true });
-    if (data) {
-      setResultsByRun((prev) => ({ ...prev, [runId]: data as ScrapeResult[] }));
-    }
+    if (resultsError) setError(resultsError.message);
+    const results = (data as ScrapeResult[]) ?? [];
+    setResultsByRun((prev) => ({ ...prev, [runId]: results }));
+    return results;
   };
 
   const toggleRun = (runId: string) => {
@@ -121,6 +131,23 @@ export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
     });
   };
 
+  const groupedRuns = () => {
+    const today = new Date();
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const groups = new Map<string, ScrapingRun[]>();
+    for (const run of runs) {
+      const date = new Date(run.created_at);
+      const key = date.toDateString() === today.toDateString()
+        ? "Today’s scrapes"
+        : date.toDateString() === yesterday.toDateString()
+          ? "Yesterday’s scrapes"
+          : date.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+      groups.set(key, [...(groups.get(key) ?? []), run]);
+    }
+    return [...groups.entries()];
+  };
+
   const escapeCsv = (val: string): string => {
     const needsQuotes = val.includes(",") || val.includes('"') || val.includes("\n");
     if (needsQuotes) {
@@ -129,9 +156,52 @@ export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
     return val;
   };
 
+  const exportRunCsv = async (run: ScrapingRun) => {
+    const results = await loadResults(run.id);
+    const rows = ["Extracted At,Batch,Target,Domain,Email,Status,Pages Scanned"];
+    for (const result of results) {
+      if (result.emails.length === 0) {
+        rows.push([formatDate(run.created_at), run.batch_label || run.domain, run.source_query || run.domain, result.domain, "", result.status, String(result.pages_scanned)].map(escapeCsv).join(","));
+      } else {
+        for (const email of result.emails) rows.push([formatDate(run.created_at), run.batch_label || run.domain, run.source_query || run.domain, result.domain, email, result.status, String(result.pages_scanned)].map(escapeCsv).join(","));
+      }
+    }
+    const url = URL.createObjectURL(new Blob([rows.join("\r\n")], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `mailharvest-${sourceType}-batch-${run.id}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportRunPdf = async (run: ScrapingRun) => {
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      setError("Allow pop-ups to print this batch as a PDF.");
+      return;
+    }
+    const results = await loadResults(run.id);
+    const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
+    const emails = results.flatMap((result) => result.emails);
+    printWindow.document.write(`<!doctype html><title>Scrape batch</title><style>body{font:12px Arial,sans-serif;padding:24px;color:#111}h1{font-size:20px}p{margin:5px 0}table{width:100%;border-collapse:collapse;margin-top:18px}td,th{text-align:left;padding:7px;border-bottom:1px solid #ddd;overflow-wrap:anywhere}</style><h1>${escapeHtml(run.batch_label || run.domain)}</h1><p>${escapeHtml(formatDate(run.created_at))}</p><p>${escapeHtml(run.source_query || run.domain)} · ${emails.length} emails</p><table><thead><tr><th>Domain</th><th>Email</th></tr></thead><tbody>${results.flatMap((result) => result.emails.map((email) => `<tr><td>${escapeHtml(result.domain)}</td><td>${escapeHtml(email)}</td></tr>`)).join("")}</tbody></table>`);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
+  };
+
+  const sendRunCampaign = async (run: ScrapingRun) => {
+    const results = await loadResults(run.id);
+    const emails = [...new Set(results.flatMap((result) => result.emails.map((email) => email.toLowerCase())))];
+    if (emails.length === 0) {
+      setError("This batch has no email addresses to send to.");
+      return;
+    }
+    onSendCampaign?.({ runId: run.id, batchLabel: run.batch_label || run.domain, emails });
+  };
+
   const exportCsv = async () => {
     const allRows: string[] = [
-      "Run Date,Run Type,Domain,Status,Emails,Pages Scanned,Error",
+      "Source,Batch Label,Search Query,Run Date,Domain,Status,Emails,Pages Scanned,Error",
     ];
 
     for (const run of runs) {
@@ -151,14 +221,14 @@ export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
       const dateStr = formatDate(run.created_at);
       if (!resList || resList.length === 0) {
         allRows.push(
-          `${escapeCsv(dateStr)},${escapeCsv(runType)},${escapeCsv(run.domain)},${escapeCsv(run.status)},0,0,`
+          `${escapeCsv(run.source_type)},${escapeCsv(run.batch_label || run.domain)},${escapeCsv(run.source_query ?? "")},${escapeCsv(dateStr)},${escapeCsv(run.domain)},${escapeCsv(run.status)},0,0,`
         );
         continue;
       }
       for (const res of resList) {
         const emailsJoined = res.emails.join("; ");
         allRows.push(
-          `${escapeCsv(dateStr)},${escapeCsv(runType)},${escapeCsv(res.domain)},${escapeCsv(res.status)},${escapeCsv(emailsJoined)},${res.pages_scanned},${escapeCsv(res.error ?? "")}`
+          `${escapeCsv(run.source_type)},${escapeCsv(run.batch_label || runType)},${escapeCsv(run.source_query ?? "")},${escapeCsv(dateStr)},${escapeCsv(res.domain)},${escapeCsv(res.status)},${escapeCsv(emailsJoined)},${res.pages_scanned},${escapeCsv(res.error ?? "")}`
         );
       }
     }
@@ -176,28 +246,18 @@ export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10 animate-fade-in">
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex flex-wrap items-end justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-3xl font-bold mb-2">Scraping history</h1>
+          <h1 className="text-3xl font-bold mb-2">{sourceType === "maps" ? "Maps scraper history" : "Website scraper history"}</h1>
           <p className="text-neutral-600">
-            Every scraping run tied to your account, with full results.
+            Dated batches, extracted contacts, and campaign actions.
           </p>
         </div>
-        <button
-          onClick={exportCsv}
-          disabled={runs.length === 0}
-          className="flex items-center gap-2 bg-white border border-neutral-200 hover:border-neutral-300 text-neutral-700 font-medium px-5 py-2.5 rounded-lg transition-colors text-sm disabled:opacity-50"
-        >
-          <Download size={16} />
-          Export CSV
-        </button>
-        <button
-          onClick={() => onNavigate("scrape")}
-          className="flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm"
-        >
-          <Mail size={16} />
-          New scrape
-        </button>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-xs font-medium text-neutral-500">Specific date<input type="date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)} className="block mt-1 px-3 py-2 border border-neutral-200 rounded-lg bg-white text-sm text-neutral-800" /></label>
+          {dateFilter && <button onClick={() => setDateFilter("")} className="px-3 py-2 border border-neutral-200 rounded-lg text-sm">Clear date</button>}
+          <button onClick={exportCsv} disabled={runs.length === 0} className="inline-flex items-center gap-2 bg-white border border-neutral-200 hover:border-neutral-300 text-neutral-700 font-medium px-4 py-2.5 rounded-lg transition-colors text-sm disabled:opacity-50"><Download size={16} />Export CSV</button>
+        </div>
       </div>
 
       {loading && (
@@ -218,22 +278,17 @@ export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
         <div className="bg-white rounded-2xl border border-neutral-200 p-12 text-center">
           <Inbox size={40} className="text-neutral-300 mx-auto mb-4" />
           <h3 className="font-semibold text-neutral-700 mb-1">No scraping history yet</h3>
-          <p className="text-neutral-500 text-sm mb-5">
-            Run your first scrape to see results saved here automatically.
-          </p>
-          <button
-            onClick={() => onNavigate("scrape")}
-            className="inline-flex items-center gap-2 bg-primary-600 hover:bg-primary-700 text-white font-medium px-5 py-2.5 rounded-lg transition-colors text-sm"
-          >
-            <Mail size={16} />
-            Start scraping
-          </button>
+          <p className="text-neutral-500 text-sm">Completed {sourceType === "maps" ? "Maps" : "website"} scrapes will appear here automatically.</p>
         </div>
       )}
 
       {!loading && runs.length > 0 && (
-        <div className="space-y-3">
-          {runs.map((run) => {
+        <div className="space-y-7">
+          {groupedRuns().map(([groupName, groupRuns]) => (
+            <section key={groupName}>
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-neutral-500">{groupName}</h2>
+              <div className="space-y-3">
+          {groupRuns.map((run) => {
             const results = resultsByRun[run.id];
             const isOpen = expanded.has(run.id);
             return (
@@ -261,7 +316,7 @@ export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-medium text-neutral-800 truncate">
-                          {run.is_bulk ? "Bulk run" : run.domain}
+                          {run.batch_label || (run.is_bulk ? "Bulk run" : run.domain)}
                         </span>
                         <span
                           className={`text-xs font-medium px-2 py-0.5 rounded-full ${
@@ -278,16 +333,20 @@ export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
                       <div className="flex items-center gap-1 text-xs text-neutral-400 mt-0.5">
                         <Calendar size={12} />
                         {formatDate(run.created_at)}
+                        <span className="ml-2 truncate">{run.source_query || run.domain}</span>
                       </div>
                     </div>
                   </button>
-                  <div className="flex items-center gap-4 shrink-0">
+                  <div className="flex flex-wrap items-center justify-end gap-1 shrink-0">
                     <div className="text-right hidden sm:block">
                       <div className="text-sm font-semibold text-neutral-800">
                         {run.total_emails}
                       </div>
                       <div className="text-xs text-neutral-400">emails</div>
                     </div>
+                    <button onClick={() => void exportRunCsv(run)} title="Export batch CSV" aria-label="Export batch CSV" className="inline-flex items-center gap-1 px-2 py-1.5 border border-neutral-200 rounded text-xs"><Download size={14} />CSV</button>
+                    <button onClick={() => void exportRunPdf(run)} title="Export batch PDF" aria-label="Export batch PDF" className="inline-flex items-center gap-1 px-2 py-1.5 border border-neutral-200 rounded text-xs"><Printer size={14} />PDF</button>
+                    {onSendCampaign && <button onClick={() => void sendRunCampaign(run)} className="inline-flex items-center gap-1 px-2 py-1.5 bg-primary-600 text-white rounded text-xs"><Send size={14} />Send Campaign</button>}
                     <button
                       onClick={() => deleteRun(run.id)}
                       disabled={deleting === run.id}
@@ -376,6 +435,9 @@ export function HistoryView({ onNavigate }: { onNavigate: (v: View) => void }) {
               </div>
             );
           })}
+              </div>
+            </section>
+          ))}
         </div>
       )}
     </div>

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Mail, Eye, EyeOff, Loader2, ArrowLeft } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { supabase } from "@/lib/supabase";
 import type { View } from "@/components/Header";
 
 export function SignupPage({ onNavigate }: { onNavigate: (v: View) => void }) {
@@ -9,7 +10,16 @@ export function SignupPage({ onNavigate }: { onNavigate: (v: View) => void }) {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [allowSignups, setAllowSignups] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void supabase.from("system_settings").select("allow_signups").eq("id", 1).maybeSingle().then(({ data }) => {
+      if (active) setAllowSignups(data?.allow_signups !== false);
+    });
+    return () => { active = false; };
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -48,6 +58,7 @@ export function SignupPage({ onNavigate }: { onNavigate: (v: View) => void }) {
               Start extracting emails from any domain in seconds. Your scraping
               history is saved automatically.
             </p>
+            {!allowSignups && <p role="status" className="mb-4 rounded-lg bg-neutral-100 px-3 py-2 text-sm text-neutral-600">New account registration is currently disabled.</p>}
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-neutral-700 mb-1.5">Email</label>
@@ -89,14 +100,14 @@ export function SignupPage({ onNavigate }: { onNavigate: (v: View) => void }) {
               )}
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || !allowSignups}
                 className="w-full bg-primary-600 hover:bg-primary-700 disabled:opacity-60 text-white font-medium py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
               >
                 {loading && <Loader2 size={18} className="animate-spin" />}
-                Create account
+                {allowSignups ? "Create account" : "Registration unavailable"}
               </button>
             </form>
-            <p className="text-center text-sm text-neutral-500 mt-5">
+            {allowSignups && <p className="text-center text-sm text-neutral-500 mt-5">
               Already have an account?{" "}
               <button
                 onClick={() => onNavigate("login")}
@@ -104,7 +115,7 @@ export function SignupPage({ onNavigate }: { onNavigate: (v: View) => void }) {
               >
                 Sign in
               </button>
-            </p>
+            </p>}
           </div>
         </div>
       </div>

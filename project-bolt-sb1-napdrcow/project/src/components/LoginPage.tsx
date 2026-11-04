@@ -3,7 +3,7 @@ import { Mail, Eye, EyeOff, Loader2, ArrowLeft } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import type { View } from "@/components/Header";
 
-export function LoginPage({ onNavigate }: { onNavigate: (v: View) => void }) {
+export function LoginPage({ onNavigate, adminLogin = false }: { onNavigate: (v: View) => void; adminLogin?: boolean }) {
   const { signIn } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -43,9 +43,9 @@ export function LoginPage({ onNavigate }: { onNavigate: (v: View) => void }) {
               </div>
               <span className="font-bold text-lg">MailHarvest</span>
             </div>
-            <h1 className="text-2xl font-bold mb-1">Welcome back</h1>
+            <h1 className="text-2xl font-bold mb-1">{adminLogin ? "Administrator sign in" : "Welcome back"}</h1>
             <p className="text-neutral-500 text-sm mb-6">
-              Sign in to access your scraping dashboard and history.
+              {adminLogin ? "Sign in with an administrator account to continue." : "Sign in to access your scraping dashboard and history."}
             </p>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
@@ -94,15 +94,17 @@ export function LoginPage({ onNavigate }: { onNavigate: (v: View) => void }) {
                 Sign in
               </button>
             </form>
-            <p className="text-center text-sm text-neutral-500 mt-5">
-              Don't have an account?{" "}
-              <button
-                onClick={() => onNavigate("signup")}
-                className="text-primary-600 font-medium hover:underline"
-              >
-                Create one
-              </button>
-            </p>
+            {!adminLogin && (
+              <p className="text-center text-sm text-neutral-500 mt-5">
+                Don't have an account?{" "}
+                <button
+                  onClick={() => onNavigate("signup")}
+                  className="text-primary-600 font-medium hover:underline"
+                >
+                  Create one
+                </button>
+              </p>
+            )}
           </div>
         </div>
       </div>

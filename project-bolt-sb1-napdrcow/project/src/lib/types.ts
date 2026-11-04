@@ -18,6 +18,15 @@ export interface ScrapingRun {
   status: string;
   total_emails: number;
   created_at: string;
+  source_type: "website" | "maps";
+  source_query: string | null;
+  batch_label: string;
+}
+
+export interface ScrapeCampaignBatch {
+  runId: string;
+  batchLabel: string;
+  emails: string[];
 }
 
 export interface ScrapeEdgeResponse {

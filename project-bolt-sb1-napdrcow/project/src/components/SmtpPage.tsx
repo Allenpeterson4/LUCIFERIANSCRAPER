@@ -1,7 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   Settings,
-  Mail,
   Send,
   Plus,
   Trash2,
@@ -23,11 +22,10 @@ import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/auth";
 import { testSmtpConnection, sendEmailsNow, processQueueBatch } from "@/lib/smtp";
 import type { SmtpConfig, EmailMessage, CampaignQueueItem } from "@/lib/smtp-types";
-import type { View } from "@/components/Header";
 
 type Tab = "config" | "messages" | "queue";
 
-export function SmtpPage({ onNavigate }: { onNavigate: (v: View) => void }) {
+export function SmtpPage() {
   const { session } = useAuth();
   const [tab, setTab] = useState<Tab>("config");
 
@@ -41,7 +39,6 @@ export function SmtpPage({ onNavigate }: { onNavigate: (v: View) => void }) {
   const [encryption, setEncryption] = useState("tls");
   const [fromEmail, setFromEmail] = useState("");
   const [fromName, setFromName] = useState("");
-  const [hourlyLimit, setHourlyLimit] = useState(100);
   const [savingConfig, setSavingConfig] = useState(false);
   const [testingConfig, setTestingConfig] = useState(false);
   const [configMessage, setConfigMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -85,7 +82,6 @@ export function SmtpPage({ onNavigate }: { onNavigate: (v: View) => void }) {
       setEncryption(c.encryption);
       setFromEmail(c.from_email);
       setFromName(c.from_name || "");
-      setHourlyLimit(c.hourly_limit);
     }
     setConfigLoading(false);
   }, []);
@@ -127,7 +123,7 @@ export function SmtpPage({ onNavigate }: { onNavigate: (v: View) => void }) {
     const payload = {
       host, port: Number(port), username, password,
       encryption, from_email: fromEmail, from_name: fromName,
-      hourly_limit: Number(hourlyLimit), is_active: true,
+      is_active: true,
     };
     let err;
     if (config) {
@@ -208,36 +204,6 @@ export function SmtpPage({ onNavigate }: { onNavigate: (v: View) => void }) {
     setSendModalOpen(true);
   };
 
-  const handleSendNow = async () => {
-    if (!session || !sendMsgId) return;
-    const recipients = sendRecipients.split(/[\n,\s]+/).map((r) => r.trim()).filter(Boolean);
-    if (recipients.length === 0) {
-      setSendResult({ type: "error", text: "Please enter at least one recipient email." });
-      return;
-    }
-    setSending(true);
-    setSendResult(null);
-    const result = await sendEmailsNow(session.access_token, sendMsgId, recipients, config?.id);
-    setSending(false);
-    setSendResult({ type: result.success ? "success" : "error", text: result.message });
-    if (result.success) {
-      loadQueue();
-    }
-  };
-
-  const handleAddToQueue = async (msgId: string) => {
-    if (!config) {
-      setQueueMessage({ type: "error", text: "Please configure SMTP settings first." });
-      setTab("config");
-      return;
-    }
-    // For queue, we need recipients — open the send modal but with a queue option
-    setSendMsgId(msgId);
-    setSendRecipients("");
-    setSendResult(null);
-    setSendModalOpen(true);
-  };
-
   const handleQueueSubmit = async (addToQueue: boolean) => {
     if (!session || !sendMsgId || !config) return;
     const recipients = sendRecipients.split(/[\n,\s]+/).map((r) => r.trim()).filter(Boolean);
@@ -246,21 +212,12 @@ export function SmtpPage({ onNavigate }: { onNavigate: (v: View) => void }) {
       return;
     }
     if (addToQueue) {
-      const batchSize = Math.min(config.hourly_limit, 50);
-      const { error } = await supabase.from("campaign_queue").insert({
-        message_id: sendMsgId,
-        smtp_config_id: config.id,
-        recipients,
-        status: "queued",
-        batch_size: batchSize,
-        next_batch_at: new Date().toISOString(),
-      });
-      if (error) {
-        setSendResult({ type: "error", text: error.message });
-        return;
-      }
-      setSendResult({ type: "success", text: `Added ${recipients.length} recipients to the queue. Batch size: ${batchSize}/hour.` });
-      loadQueue();
+      setSending(true);
+      setSendResult(null);
+      const result = await sendEmailsNow(session.access_token, sendMsgId, recipients, config.id);
+      setSending(false);
+      setSendResult({ type: result.success ? "success" : "error", text: result.message });
+      if (result.success) loadQueue();
     } else {
       setSending(true);
       setSendResult(null);
@@ -365,12 +322,6 @@ export function SmtpPage({ onNavigate }: { onNavigate: (v: View) => void }) {
                     <option value="ssl">SSL/TLS</option>
                     <option value="none">None</option>
                   </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-neutral-700 mb-1.5">Hourly Send Limit</label>
-                  <input type="number" value={hourlyLimit} onChange={(e) => setHourlyLimit(Number(e.target.value))}
-                    min={1}
-                    className="w-full px-4 py-2.5 rounded-lg border border-neutral-200 focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none transition-all text-sm" />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-neutral-700 mb-1.5">From Email</label>
@@ -519,8 +470,7 @@ export function SmtpPage({ onNavigate }: { onNavigate: (v: View) => void }) {
             <div className="bg-neutral-50 rounded-lg p-4 text-sm text-neutral-600 mb-4">
               <p className="flex items-center gap-2">
                 <Clock size={15} className="text-primary-600" />
-                The scheduler breaks large campaigns into hourly batches that respect your provider's sending limit.
-                Click "Process next batch" to send the current hour's batch manually.
+                Campaigns dispatch automatically. The rate adapts to successful delivery and provider throttling, then resumes when the provider allows.
               </p>
             </div>
             {queueMessage && (
@@ -585,7 +535,7 @@ export function SmtpPage({ onNavigate }: { onNavigate: (v: View) => void }) {
                         <div className="bg-primary-600 h-2 rounded-full transition-all" style={{ width: `${pct}%` }} />
                       </div>
                       <div className="flex items-center justify-between text-xs text-neutral-400">
-                        <span>Batch: {item.batch_size}/hour</span>
+                        <span>Adaptive delivery</span>
                         <span>Created {formatDate(item.created_at)}</span>
                       </div>
                       {item.next_batch_at && (
@@ -637,7 +587,7 @@ export function SmtpPage({ onNavigate }: { onNavigate: (v: View) => void }) {
                 <button onClick={() => handleQueueSubmit(false)} disabled={sending}
                   className="flex-1 flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-60 text-white font-medium py-2.5 rounded-lg transition-colors text-sm">
                   {sending ? <Loader2 size={16} className="animate-spin" /> : <Zap size={16} />}
-                  Send now
+                  Queue send
                 </button>
                 <button onClick={() => handleQueueSubmit(true)}
                   className="flex-1 flex items-center justify-center gap-2 bg-white border border-neutral-200 hover:border-neutral-300 text-neutral-700 font-medium py-2.5 rounded-lg transition-colors text-sm">

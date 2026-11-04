@@ -291,6 +291,15 @@ Deno.serve(async (req: Request) => {
     }
     const userId = userData.user.id;
 
+    const { data: systemSettings, error: settingsError } = await supabase.from("system_settings")
+      .select("maintenance_mode,max_domains_per_run").eq("id", 1).single();
+    if (settingsError || !systemSettings) {
+      return new Response(JSON.stringify({ error: "System settings are unavailable." }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    if (systemSettings.maintenance_mode) {
+      return new Response(JSON.stringify({ error: "The system is in maintenance mode." }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
     const body = await req.json();
     const rawDomains: string[] = Array.isArray(body.domains)
       ? body.domains
@@ -309,11 +318,39 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // Limit to 5 domains for single request to stay within edge function time limits
-    const domainsToProcess = domains.slice(0, 5);
+    const maxDomains = Math.min(5, systemSettings.max_domains_per_run);
+    if (domains.length > maxDomains) {
+      return new Response(JSON.stringify({ error: `This request exceeds the current limit of ${maxDomains} domains.` }), {
+        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    const domainsToProcess = domains;
+
+    const { data: creditData, error: creditError } = await supabase.rpc("consume_user_credits", {
+      p_user_id: userId,
+      p_amount: domainsToProcess.length,
+      p_reason: "email_domain_scrape",
+    });
+    const creditResult = Array.isArray(creditData) ? creditData[0] : creditData;
+    if (creditError || !creditResult) {
+      return new Response(JSON.stringify({ error: "Could not verify credit balance." }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    if (!creditResult.allowed) {
+      return new Response(JSON.stringify({
+        error: `Not enough credits. This scrape needs ${domainsToProcess.length} credits; ${creditResult.total_remaining} remain.`,
+        credits_remaining: creditResult.total_remaining,
+      }), { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
 
     const isBulk = domainsToProcess.length > 1;
     const primaryDomain = domainsToProcess[0];
+    const sourceType = body.source_type === "maps" ? "maps" : "website";
+    const sourceQuery = typeof body.source_query === "string"
+      ? body.source_query.trim().slice(0, 200) || null
+      : null;
+    const requestedLabel = typeof body.batch_label === "string"
+      ? body.batch_label.trim().slice(0, 120)
+      : "";
 
     const { data: run, error: runError } = await supabase
       .from("scraping_runs")
@@ -322,6 +359,9 @@ Deno.serve(async (req: Request) => {
         domain: primaryDomain,
         is_bulk: isBulk,
         status: "running",
+        source_type: sourceType,
+        source_query: sourceQuery,
+        batch_label: requestedLabel || `${sourceType === "maps" ? "Maps" : "Website"}: ${sourceQuery || primaryDomain}`,
       })
       .select()
       .single();
@@ -362,6 +402,30 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    const discoveredAt = new Date().toISOString();
+    const uniqueContacts = new Map<string, { user_id: string; email: string; domain: string; source_run_id: string; last_seen_at: string }>();
+    for (const result of results) {
+      for (const rawEmail of result.emails) {
+        const email = rawEmail.trim().toLowerCase();
+        if (!email) continue;
+        uniqueContacts.set(email, {
+          user_id: userId,
+          email,
+          domain: result.domain,
+          source_run_id: runId,
+          last_seen_at: discoveredAt,
+        });
+      }
+    }
+    if (uniqueContacts.size > 0) {
+      const { error: contactIndexError } = await supabase
+        .from("email_contacts")
+        .upsert([...uniqueContacts.values()], { onConflict: "user_id,email" });
+      if (contactIndexError) {
+        console.error("Could not update the normalized email directory:", contactIndexError.message);
+      }
+    }
+
     const totalEmails = results.reduce((sum, r) => sum + r.emails.length, 0);
     const anyFailed = results.some((r) => r.status === "failed");
     const overallStatus = anyFailed && totalEmails === 0 ? "failed" : "completed";
@@ -376,13 +440,14 @@ Deno.serve(async (req: Request) => {
         run_id: runId,
         total_emails: totalEmails,
         domains_scraped: domainsToProcess.length,
+        credits_remaining: creditResult.total_remaining,
         results,
       }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (err) {
     return new Response(
-      JSON.stringify({ error: err.message || "An unexpected error occurred during scraping." }),
+      JSON.stringify({ error: err instanceof Error ? err.message : "An unexpected error occurred during scraping." }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }

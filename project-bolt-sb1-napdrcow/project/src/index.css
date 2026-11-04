@@ -62,3 +62,46 @@
 ::-webkit-scrollbar-thumb:hover {
   background: #9aa3b5;
 }
+
+.theme-black,
+.theme-black body,
+.theme-black .bg-white,
+.theme-black .bg-neutral-50,
+.theme-black .bg-neutral-100,
+.theme-black [class*="bg-primary-"],
+.theme-black [class*="bg-accent-"],
+.theme-black [class*="bg-red-"],
+.theme-black [class*="bg-green-"],
+.theme-black [class*="bg-amber-"] {
+  background-color: #000 !important;
+  color: #fff !important;
+}
+
+.theme-black [class*="text-neutral-"],
+.theme-black [class*="text-primary-"],
+.theme-black [class*="text-accent-"] {
+  color: #fff !important;
+}
+
+.theme-black [class*="border-neutral-"],
+.theme-black [class*="border-primary-"],
+.theme-black [class*="border-accent-"] {
+  border-color: #fff !important;
+}
+
+.theme-black input,
+.theme-black textarea,
+.theme-black select {
+  background-color: #000 !important;
+  border-color: #fff !important;
+  color: #fff !important;
+}
+
+.theme-black input::placeholder,
+.theme-black textarea::placeholder {
+  color: #c7c7c7 !important;
+}
+
+.theme-black .glass {
+  background: rgba(0, 0, 0, 0.94);
+}

@@ -13,9 +13,16 @@ export interface ScrapeResponseData {
   }>;
 }
 
+export interface ScrapeOptions {
+  sourceType?: "website" | "maps";
+  sourceQuery?: string;
+  batchLabel?: string;
+}
+
 export async function scrapeDomains(
   domains: string[],
-  accessToken: string
+  accessToken: string,
+  options: ScrapeOptions = {}
 ): Promise<ScrapeResponseData> {
   const url = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/scrape-emails`;
   let res: Response;
@@ -27,7 +34,12 @@ export async function scrapeDomains(
         Authorization: `Bearer ${accessToken}`,
         apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
       },
-      body: JSON.stringify({ domains }),
+      body: JSON.stringify({
+        domains,
+        source_type: options.sourceType,
+        source_query: options.sourceQuery,
+        batch_label: options.batchLabel,
+      }),
     });
   } catch {
     throw new Error(

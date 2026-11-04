@@ -6,18 +6,36 @@ const corsHeaders = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Info, Apikey",
 };
 
-const EMAIL_REGEX = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-
-const EXHIBITION_KEYWORDS = [
-  "exhibit", "exhibitor", "expo", "trade show", "trade fair",
-  "fair", "stand", "booth", "hall", "pavilion", "messe",
+const EXHIBITION_LISTING_MARKERS = [
+  "exhibitor list", "exhibitor directory", "exhibitor catalogue", "exhibitor catalog",
+  "our exhibitors", "meet the exhibitors", "exhibiting companies", "list of exhibitors",
+  "participant list", "participants list", "participant directory", "participants directory",
+  "list of participants", "exhibition directory", "exhibitor search results",
 ];
 
-const B2B_KEYWORDS = [
-  "marketplace", "supplier", "seller", "vendor", "manufacturer",
-  "wholesale", "distributor", "factory", "alibaba", "amazon",
-  "ebay", "etsy", "seller list", "store list",
+const DISTRIBUTOR_LISTING_MARKERS = [
+  "supplier directory", "supplier list", "vendor directory", "vendor list",
+  "seller directory", "seller list", "distributor directory", "distributor list",
+  "manufacturer directory", "manufacturer list", "wholesale directory",
+  "marketplace sellers", "authorized distributors", "supplier search results",
+  "vendor search results", "seller search results",
 ];
+
+const TARGET_URL_ENTITIES = [
+  "exhibitor", "exhibitors", "participant", "participants", "supplier", "suppliers",
+  "vendor", "vendors", "seller", "sellers", "manufacturer", "manufacturers",
+  "distributor", "distributors",
+];
+
+const TARGET_URL_DIRECTORY_MARKERS = [
+  "directory", "directories", "list", "lists", "catalog", "catalogue", "catalogues",
+  "companies", "results", "exhibitor", "exhibitors", "participant", "participants",
+  "supplier", "suppliers", "vendor", "vendors", "seller", "sellers", "distributor",
+  "distributors", "manufacturer", "manufacturers",
+];
+
+const LISTING_ELEMENT_MARKERS = /(?:exhibitor|participant|supplier|vendor|seller|distributor|manufacturer|company|listing|directory|result|card)/i;
+const GENERIC_LINK_LABELS = new Set(["website", "visit", "visit website", "details", "more", "learn more", "view", "click here"]);
 
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
   "Technology & IT": ["tech", "software", "it", "digital", "cloud", "data", "ai", "cyber", "saas", "app"],
@@ -52,11 +70,24 @@ function categorize(text: string): string {
   return "Other";
 }
 
-function detectSourceType(url: string, html: string): string {
-  const combined = (url + " " + html).toLowerCase();
-  if (EXHIBITION_KEYWORDS.some((k) => combined.includes(k))) return "exhibition";
-  if (B2B_KEYWORDS.some((k) => combined.includes(k))) return "b2b";
+function stripNonContentHtml(html: string): string {
+  return html
+    .replace(/<!--([\s\S]*?)-->/g, " ")
+    .replace(/<(script|style|noscript|nav|header|footer|aside)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ");
+}
+
+function detectSourceType(html: string): string {
+  const content = html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").toLowerCase();
+  if (EXHIBITION_LISTING_MARKERS.some((marker) => content.includes(marker))) return "exhibition";
+  if (DISTRIBUTOR_LISTING_MARKERS.some((marker) => content.includes(marker))) return "b2b";
   return "generic";
+}
+
+function isDesignatedTargetUrl(url: URL): boolean {
+  const tokens = `${url.hostname} ${url.pathname}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  const hasTargetEntity = TARGET_URL_ENTITIES.some((marker) => tokens.includes(marker));
+  const hasDirectoryMarker = TARGET_URL_DIRECTORY_MARKERS.some((marker) => tokens.includes(marker));
+  return hasTargetEntity && hasDirectoryMarker;
 }
 
 function extractRootDomain(host: string): string {
@@ -102,59 +133,34 @@ function extractDomainsFromHtml(html: string, sourceUrl: string): ExtractedDomai
   let baseHost = "";
   try { baseHost = new URL(sourceUrl).hostname.toLowerCase(); } catch { /* ignore */ }
 
-  // 1. Extract from <a href> links
-  const linkRegex = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  let match: RegExpExecArray | null;
-  while ((match = linkRegex.exec(html)) !== null) {
-    const href = match[1];
-    const linkText = match[2].replace(/<[^>]*>/g, "").trim();
-    if (!href || href.startsWith("#") || href.startsWith("mailto:") || href.startsWith("tel:") || href.startsWith("javascript:")) continue;
-    let abs: string;
-    try { abs = new URL(href, sourceUrl).toString(); } catch { continue; }
-    let u: URL;
-    try { u = new URL(abs); } catch { continue; }
-    const host = u.hostname.toLowerCase().replace(/^www\./, "");
-    if (!host || !host.includes(".")) continue;
-    if (baseHost && (host === baseHost || host.endsWith("." + baseHost))) continue;
-    if (isSocialOrUtility(host)) continue;
-    const root = extractRootDomain(host);
-    if (isCommonPublicSuffix(root)) continue;
-    if (!domainMap.has(root)) {
-      domainMap.set(root, { domain: root, name: linkText.slice(0, 120) || null, category: categorize(linkText + " " + root), source_page_url: abs });
-    }
-  }
+  const recordPattern = /<(tr|li)\b[^>]*>[\s\S]*?<\/\1\s*>|<div\b[^>]*(?:class|id)=["'][^"']*["'][^>]*>[\s\S]*?<\/div\s*>/gi;
+  let recordMatch: RegExpExecArray | null;
+  while ((recordMatch = recordPattern.exec(html)) !== null) {
+    const record = recordMatch[0];
+    const openingTag = record.slice(0, record.indexOf(">") + 1);
+    if (!/<(tr|li)\b/i.test(openingTag) && !LISTING_ELEMENT_MARKERS.test(openingTag)) continue;
 
-  // 2. Extract bare domain mentions in text
-  const bareDomainRegex = /(?:https?:\/\/)?(?:www\.)?([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.[a-z]{2,}(?:\.[a-z]{2,})?)/gi;
-  while ((match = bareDomainRegex.exec(html)) !== null) {
-    let host = match[1].toLowerCase().split("/")[0];
-    if (!host.includes(".")) continue;
-    if (baseHost && (host === baseHost || host.endsWith("." + baseHost))) continue;
-    if (isSocialOrUtility(host)) continue;
-    const root = extractRootDomain(host);
-    if (isCommonPublicSuffix(root)) continue;
-    if (!domainMap.has(root)) {
-      const idx = match.index;
-      const surrounding = html.slice(Math.max(0, idx - 80), idx + match[0].length + 80);
-      const textAround = surrounding.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
-      domainMap.set(root, { domain: root, name: textAround.slice(0, 120) || null, category: categorize(root), source_page_url: null });
-    }
-  }
+    const linkPattern = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    let linkMatch: RegExpExecArray | null;
+    while ((linkMatch = linkPattern.exec(record)) !== null) {
+      const href = linkMatch[1];
+      const linkText = linkMatch[2].replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+      if (!href || !linkText || GENERIC_LINK_LABELS.has(linkText.toLowerCase())) continue;
 
-  // 3. Extract from email addresses
-  EMAIL_REGEX.lastIndex = 0;
-  while ((match = EMAIL_REGEX.exec(html)) !== null) {
-    const email = match[0].toLowerCase();
-    const atIdx = email.indexOf("@");
-    if (atIdx < 0) continue;
-    const host = email.slice(atIdx + 1);
-    if (!host || !host.includes(".")) continue;
-    if (baseHost && (host === baseHost || host.endsWith("." + baseHost))) continue;
-    if (isSocialOrUtility(host)) continue;
-    const root = extractRootDomain(host);
-    if (isCommonPublicSuffix(root)) continue;
-    if (!domainMap.has(root)) {
-      domainMap.set(root, { domain: root, name: null, category: categorize(root), source_page_url: null });
+      let linkedUrl: URL;
+      try { linkedUrl = new URL(href, sourceUrl); } catch { continue; }
+      if (!/^https?:$/.test(linkedUrl.protocol)) continue;
+      const host = linkedUrl.hostname.toLowerCase().replace(/^www\./, "");
+      if (!host.includes(".") || host === baseHost || host.endsWith(`.${baseHost}`) || isSocialOrUtility(host)) continue;
+
+      const root = extractRootDomain(host);
+      if (isCommonPublicSuffix(root) || domainMap.has(root)) continue;
+      domainMap.set(root, {
+        domain: root,
+        name: linkText.slice(0, 120),
+        category: categorize(linkText + " " + root),
+        source_page_url: linkedUrl.toString(),
+      });
     }
   }
 
@@ -173,6 +179,85 @@ async function fetchWithTimeout(url: string, timeoutMs = 12000): Promise<string 
     if (!res.ok) return null;
     return await res.text();
   } catch { return null; } finally { clearTimeout(t); }
+}
+
+interface ListingInspection {
+  source_url: string;
+  source_type: string;
+  domains: ExtractedDomain[];
+}
+
+function isSameSite(url: URL, siteHost: string): boolean {
+  return url.hostname === siteHost || url.hostname.endsWith(`.${siteHost}`);
+}
+
+function findDirectoryLinks(html: string, siteUrl: URL): URL[] {
+  const found = new Map<string, URL>();
+  const linkPattern = /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = linkPattern.exec(html)) !== null) {
+    try {
+      const link = new URL(match[1], siteUrl);
+      if (!/^https?:$/.test(link.protocol) || !isSameSite(link, siteUrl.hostname) || !isDesignatedTargetUrl(link)) continue;
+      link.hash = "";
+      found.set(link.toString(), link);
+    } catch { /* ignore invalid links */ }
+  }
+  return Array.from(found.values());
+}
+
+async function fetchPage(url: URL): Promise<string | null> {
+  const html = await fetchWithTimeout(url.toString());
+  if (html) return html;
+  if (url.protocol !== "https:") return null;
+  const httpUrl = new URL(url.toString());
+  httpUrl.protocol = "http:";
+  return await fetchWithTimeout(httpUrl.toString());
+}
+
+async function inspectListing(url: URL): Promise<ListingInspection | null> {
+  if (!isDesignatedTargetUrl(url)) return null;
+  const html = await fetchPage(url);
+  if (!html) return null;
+  const listingHtml = stripNonContentHtml(html);
+  const sourceType = detectSourceType(listingHtml);
+  if (sourceType === "generic") return null;
+  const domains = extractDomainsFromHtml(listingHtml, url.toString());
+  if (domains.length === 0) return null;
+  return { source_url: url.toString(), source_type: sourceType, domains };
+}
+
+async function locateDirectories(inputUrl: URL): Promise<ListingInspection[]> {
+  const candidates = new Map<string, URL>();
+  if (isDesignatedTargetUrl(inputUrl)) {
+    inputUrl.hash = "";
+    candidates.set(inputUrl.toString(), inputUrl);
+  } else {
+    const siteUrl = new URL("/", inputUrl.origin);
+    const homepageHtml = await fetchPage(siteUrl);
+    if (homepageHtml) {
+      for (const link of findDirectoryLinks(stripNonContentHtml(homepageHtml), siteUrl)) {
+        candidates.set(link.toString(), link);
+      }
+    }
+
+    const knownPaths = [
+      "/exhibitors", "/exhibitor-list", "/exhibitor-directory", "/participants",
+      "/participant-list", "/vendors", "/vendor-directory", "/sellers",
+      "/seller-directory", "/suppliers", "/supplier-directory", "/distributors",
+      "/distributor-directory",
+    ];
+    for (const path of knownPaths) {
+      const candidate = new URL(path, siteUrl);
+      if (isDesignatedTargetUrl(candidate)) candidates.set(candidate.toString(), candidate);
+    }
+  }
+
+  const inspections = await Promise.all(
+    Array.from(candidates.values()).slice(0, 16).map((candidate) => inspectListing(candidate))
+  );
+  return inspections.filter((inspection): inspection is ListingInspection => inspection !== null)
+    .sort((left, right) => right.domains.length - left.domains.length);
 }
 
 Deno.serve(async (req: Request) => {
@@ -197,46 +282,100 @@ Deno.serve(async (req: Request) => {
     }
     const userId = userData.user.id;
 
+    const { data: systemSettings, error: settingsError } = await supabase.from("system_settings")
+      .select("maintenance_mode").eq("id", 1).single();
+    if (settingsError || !systemSettings) {
+      return new Response(JSON.stringify({ error: "System settings are unavailable." }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    if (systemSettings.maintenance_mode) {
+      return new Response(JSON.stringify({ error: "The system is in maintenance mode." }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
     const body = await req.json();
-    const sourceUrl: string = (body.url || body.source_url || "").trim();
-    if (!sourceUrl) {
-      return new Response(JSON.stringify({ error: "No URL provided" }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    const action = body.action === "extract" ? "extract" : "preview";
+    const source = typeof body.url === "string" ? body.url.trim() : "";
+    if (!source) {
+      return new Response(JSON.stringify({ error: "Enter a website domain or directory URL." }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    let normalizedUrl = sourceUrl;
-    if (!/^https?:\/\//i.test(normalizedUrl)) normalizedUrl = "https://" + normalizedUrl;
-
-    let html = await fetchWithTimeout(normalizedUrl);
-    if (!html) {
-      const httpUrl = normalizedUrl.replace(/^https:/, "http:");
-      html = await fetchWithTimeout(httpUrl);
+    const normalizedInput = /^https?:\/\//i.test(source) ? source : `https://${source}`;
+    let inputUrl: URL;
+    try {
+      inputUrl = new URL(normalizedInput);
+    } catch {
+      return new Response(JSON.stringify({ error: "Enter a valid website domain or directory URL." }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    if (!/^https?:$/.test(inputUrl.protocol) || inputUrl.username || inputUrl.password || !inputUrl.hostname.includes(".")) {
+      return new Response(JSON.stringify({ error: "Only public HTTP or HTTPS website domains are supported." }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    if (!html) {
-      return new Response(JSON.stringify({ error: "Could not fetch the provided URL. The site may be unreachable or blocking automated requests." }), { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    if (action === "preview") {
+      const inspections = await locateDirectories(inputUrl);
+      if (inspections.length === 0) {
+        return new Response(JSON.stringify({ error: "No validated exhibitor, participant, vendor, seller, supplier, or distributor directory was found on this site." }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+      const directory = inspections[0];
+      return new Response(JSON.stringify({
+        directory_url: directory.source_url,
+        source_type: directory.source_type,
+        total_listings: directory.domains.length,
+      }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    const sourceType = detectSourceType(normalizedUrl, html);
-    const domains = extractDomainsFromHtml(html, normalizedUrl);
+    const selectedUrl = typeof body.directory_url === "string" ? body.directory_url : "";
+    let selectedDirectory: URL;
+    try { selectedDirectory = new URL(selectedUrl); } catch {
+      return new Response(JSON.stringify({ error: "The selected directory URL is invalid." }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    if (!isSameSite(selectedDirectory, inputUrl.hostname) || !isDesignatedTargetUrl(selectedDirectory)) {
+      return new Response(JSON.stringify({ error: "The selected URL is not a validated directory on this site." }), { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    const confirmedDirectory = await inspectListing(selectedDirectory);
+    if (!confirmedDirectory) {
+      return new Response(JSON.stringify({ error: "The directory changed or no longer contains valid listing records. No domains were saved." }), { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
 
-    if (domains.length === 0) {
-      return new Response(JSON.stringify({ error: "No exhibitor or seller domains were found on this page. The page may use JavaScript rendering or require a different URL." }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    const { data: creditData, error: creditError } = await supabase.rpc("consume_user_credits", {
+      p_user_id: userId,
+      p_amount: confirmedDirectory.domains.length,
+      p_reason: "directory_listing_extraction",
+    });
+    const creditResult = Array.isArray(creditData) ? creditData[0] : creditData;
+    if (creditError || !creditResult) {
+      return new Response(JSON.stringify({ error: "Could not verify credit balance." }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+    if (!creditResult.allowed) {
+      return new Response(JSON.stringify({
+        error: `Not enough credits. This extraction needs ${confirmedDirectory.domains.length} credits; ${creditResult.total_remaining} remain.`,
+        credits_remaining: creditResult.total_remaining,
+      }), { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
     const { data: run, error: runError } = await supabase
       .from("domain_parsing_runs")
-      .insert({ user_id: userId, source_url: normalizedUrl, source_type: sourceType, status: "completed", total_domains: domains.length })
+      .insert({ user_id: userId, source_url: confirmedDirectory.source_url, source_type: confirmedDirectory.source_type, status: "completed", total_domains: confirmedDirectory.domains.length })
       .select().single();
 
     if (runError || !run) {
       return new Response(JSON.stringify({ error: "Failed to save parsing run" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    const rows = domains.map((d) => ({ run_id: run.id, user_id: userId, domain: d.domain, name: d.name, category: d.category, source_page_url: d.source_page_url }));
-    await supabase.from("domain_parse_results").insert(rows);
+    const rows = confirmedDirectory.domains.map((domain) => ({ run_id: run.id, user_id: userId, domain: domain.domain, name: domain.name, category: domain.category, source_page_url: domain.source_page_url }));
+    const { error: resultsError } = await supabase.from("domain_parse_results").insert(rows);
+    if (resultsError) {
+      await supabase.from("domain_parsing_runs").delete().eq("id", run.id).eq("user_id", userId);
+      return new Response(JSON.stringify({ error: "Could not save directory listings." }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
 
-    return new Response(JSON.stringify({ run_id: run.id, source_url: normalizedUrl, source_type: sourceType, total_domains: domains.length, domains }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({
+      run_id: run.id,
+      source_url: confirmedDirectory.source_url,
+      source_type: confirmedDirectory.source_type,
+      total_domains: confirmedDirectory.domains.length,
+      credits_remaining: creditResult.total_remaining,
+      domains: confirmedDirectory.domains,
+    }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
   } catch (err) {
-    return new Response(JSON.stringify({ error: err.message || "Internal server error" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ error: err instanceof Error ? err.message : "Internal server error" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
   }
 });

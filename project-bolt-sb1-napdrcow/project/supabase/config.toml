@@ -6,3 +6,6 @@ verify_jwt = true
 
 [functions.smtp-send]
 verify_jwt = true
+
+[functions.credit-wallet]
+verify_jwt = false

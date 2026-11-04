@@ -1,9 +1,12 @@
 import type { ParseDomainsResponse } from "@/lib/types";
 
-export async function parseDomainsFromUrl(
-  url: string,
-  accessToken: string
-): Promise<ParseDomainsResponse> {
+export interface DirectoryPreview {
+  directory_url: string;
+  source_type: string;
+  total_listings: number;
+}
+
+async function callParseFunction<T>(body: Record<string, string>, accessToken: string): Promise<T> {
   const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/parse-domains`;
   const res = await fetch(apiUrl, {
     method: "POST",
@@ -12,7 +15,7 @@ export async function parseDomainsFromUrl(
       Authorization: `Bearer ${accessToken}`,
       apikey: import.meta.env.VITE_SUPABASE_ANON_KEY as string,
     },
-    body: JSON.stringify({ url }),
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
@@ -27,8 +30,20 @@ export async function parseDomainsFromUrl(
   }
 
   const data = await res.json();
-  if (!data || !data.domains) {
+  if (!data) {
     throw new Error("Unexpected response from domain parsing service");
   }
-  return data as ParseDomainsResponse;
+  return data as T;
+}
+
+export function previewDomainDirectory(url: string, accessToken: string): Promise<DirectoryPreview> {
+  return callParseFunction<DirectoryPreview>({ action: "preview", url }, accessToken);
+}
+
+export function extractDomainDirectory(
+  url: string,
+  directoryUrl: string,
+  accessToken: string,
+): Promise<ParseDomainsResponse> {
+  return callParseFunction<ParseDomainsResponse>({ action: "extract", url, directory_url: directoryUrl }, accessToken);
 }

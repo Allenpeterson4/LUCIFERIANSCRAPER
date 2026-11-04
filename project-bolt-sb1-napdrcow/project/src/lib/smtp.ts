@@ -36,10 +36,11 @@ export async function sendEmailsNow(
   accessToken: string,
   messageId: string,
   recipients: string[],
-  configId?: string
+  configId?: string,
+  options?: { sourceBatchId?: string | null; batchLabel?: string | null }
 ): Promise<SmtpSendResponse> {
   const res = await callSmtpFunction(
-    { action: "send", message_id: messageId, recipients, config_id: configId },
+    { action: "send", message_id: messageId, recipients, config_id: configId, ...options },
     accessToken
   );
   const data = await res.json();
