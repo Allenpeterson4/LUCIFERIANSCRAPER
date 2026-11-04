@@ -1,0 +1,17 @@
+{
+  "projectId": "72655250",
+  "functions": {
+    "parse-domains": {
+      "hasChanged": false,
+      "hash": "0576bfca802408c4095ae968f0dff60cf0d6570ba138a2c12d713a5dc94b2a17"
+    },
+    "scrape-emails": {
+      "hasChanged": true,
+      "hash": "46ffdcc38546f95ee70bf4f71df135866036ebaa84e69fe9cab3ffe2d436d551"
+    },
+    "smtp-send": {
+      "hasChanged": false,
+      "hash": "d09a3841ca5c654b734a07d70188b57865068a0c8458af24ad8db1b604a69975"
+    }
+  }
+}

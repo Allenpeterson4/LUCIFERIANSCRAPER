@@ -1,0 +1,8 @@
+[functions.scrape-emails]
+verify_jwt = true
+
+[functions.parse-domains]
+verify_jwt = true
+
+[functions.smtp-send]
+verify_jwt = true
