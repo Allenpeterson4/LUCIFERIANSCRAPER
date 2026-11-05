@@ -15,6 +15,8 @@ import { MapsScraperPage } from "@/components/MapsScraperPage";
 import { AdminDashboard } from "@/components/AdminDashboard";
 import { AboutUsPage, HowItWorksPage, OurMissionPage, OurServicesPage } from "@/components/PublicInfoPages";
 import { CreditWalletPage } from "@/components/CreditWalletPage";
+import { AccountSettingsPage } from "@/components/AccountSettingsPage";
+import { ResetPasswordPage } from "@/components/ResetPasswordPage";
 import type { ScrapeCampaignBatch } from "@/lib/types";
 
 const routeViews: Record<string, View> = {
@@ -24,6 +26,8 @@ const routeViews: Record<string, View> = {
   "/our-services": "services",
   "/how-it-works": "how-it-works",
   "/credits": "credits",
+  "/settings": "settings",
+  "/reset-password": "reset-password",
   "/scrape": "scrape",
   "/domain-scraping": "domains",
   "/email-lists": "lists",
@@ -48,7 +52,6 @@ function AppContent() {
   const [view, setView] = useState<View>(initialView);
   const [adminRoute, setAdminRoute] = useState(() => window.location.pathname === "/admin" || window.location.pathname === "/admin/login");
   const [maintenanceMode, setMaintenanceMode] = useState(false);
-  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [pendingDomains, setPendingDomains] = useState<string[]>([]);
   const [pendingCampaign, setPendingCampaign] = useState<ScrapeCampaignBatch | null>(null);
 
@@ -61,7 +64,6 @@ function AppContent() {
   const refreshSystemSettings = useCallback(async () => {
     const { data } = await supabase.from("system_settings").select("maintenance_mode").eq("id", 1).maybeSingle();
     setMaintenanceMode(Boolean(data?.maintenance_mode));
-    setSettingsLoaded(true);
   }, []);
 
   useEffect(() => {
@@ -116,7 +118,7 @@ function AppContent() {
       setView("scrape");
       window.history.replaceState(null, "", "/scrape");
     }
-    if (!user && !["home", "about", "mission", "services", "how-it-works", "login", "signup"].includes(view)) {
+    if (!user && !["home", "about", "mission", "services", "how-it-works", "login", "signup", "reset-password"].includes(view)) {
       setView("home");
       window.history.replaceState(null, "", "/");
     }
@@ -147,14 +149,6 @@ function AppContent() {
             />
           )}
         </main>
-      </div>
-    );
-  }
-
-  if (!settingsLoaded) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-neutral-50">
-        <Loader2 size={32} className="animate-spin text-primary-600" />
       </div>
     );
   }
@@ -199,7 +193,7 @@ function AppContent() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const isAuthPage = view === "login" || view === "signup";
+  const isAuthPage = view === "login" || view === "signup" || view === "reset-password";
 
   const lockedView = (
     <div className="max-w-md mx-auto px-4 py-24 text-center animate-fade-in">
@@ -229,8 +223,10 @@ function AppContent() {
         {view === "services" && <OurServicesPage onNavigate={navigate} />}
         {view === "how-it-works" && <HowItWorksPage onNavigate={navigate} />}
         {view === "credits" && (user ? <CreditWalletPage /> : lockedView)}
+        {view === "settings" && (user ? <AccountSettingsPage /> : lockedView)}
         {view === "login" && !user && <LoginPage onNavigate={navigate} />}
         {view === "signup" && !user && <SignupPage onNavigate={navigate} />}
+        {view === "reset-password" && <ResetPasswordPage onNavigate={navigate} />}
         {view === "scrape" &&
           (user ? (
             <ScrapeTool

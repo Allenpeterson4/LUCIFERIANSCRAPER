@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+import { filterRelevantCompanies } from "../_shared/company-intent.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -33,6 +34,12 @@ const TARGET_URL_DIRECTORY_MARKERS = [
   "supplier", "suppliers", "vendor", "vendors", "seller", "sellers", "distributor",
   "distributors", "manufacturer", "manufacturers",
 ];
+
+const BLOCKED_URL_SEGMENTS = new Set([
+  "affiliate", "affiliates", "career", "careers", "cookie", "cookies", "job", "jobs",
+  "legal", "partner", "partners", "partnership", "partnerships", "policy", "policies",
+  "privacy", "terms",
+]);
 
 const LISTING_ELEMENT_MARKERS = /(?:exhibitor|participant|supplier|vendor|seller|distributor|manufacturer|company|listing|directory|result|card)/i;
 const GENERIC_LINK_LABELS = new Set(["website", "visit", "visit website", "details", "more", "learn more", "view", "click here"]);
@@ -84,6 +91,8 @@ function detectSourceType(html: string): string {
 }
 
 function isDesignatedTargetUrl(url: URL): boolean {
+  const pathTokens = `${url.pathname} ${url.search}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+  if (pathTokens.some((token) => BLOCKED_URL_SEGMENTS.has(token))) return false;
   const tokens = `${url.hostname} ${url.pathname}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
   const hasTargetEntity = TARGET_URL_ENTITIES.some((marker) => tokens.includes(marker));
   const hasDirectoryMarker = TARGET_URL_DIRECTORY_MARKERS.some((marker) => tokens.includes(marker));
@@ -104,7 +113,10 @@ function extractRootDomain(host: string): string {
 interface ExtractedDomain {
   domain: string;
   name: string | null;
+  business_name: string;
+  service_summary: string;
   category: string;
+  source: "exhibition" | "b2b";
   source_page_url: string | null;
 }
 
@@ -128,7 +140,7 @@ function isCommonPublicSuffix(domain: string): boolean {
   return COMMON_PUBLIC_SUFFIXES.has(domain);
 }
 
-function extractDomainsFromHtml(html: string, sourceUrl: string): ExtractedDomain[] {
+function extractDomainsFromHtml(html: string, sourceUrl: string, sourceType: string): ExtractedDomain[] {
   const domainMap = new Map<string, ExtractedDomain>();
   let baseHost = "";
   try { baseHost = new URL(sourceUrl).hostname.toLowerCase(); } catch { /* ignore */ }
@@ -155,10 +167,18 @@ function extractDomainsFromHtml(html: string, sourceUrl: string): ExtractedDomai
 
       const root = extractRootDomain(host);
       if (isCommonPublicSuffix(root) || domainMap.has(root)) continue;
+      const recordText = record.replace(/<[^>]*>/g, " ").replace(/&nbsp;|&#160;/gi, " ")
+        .replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'")
+        .replace(/\s+/g, " ").trim();
+      const serviceSummary = recordText.replace(linkText, "").trim().slice(0, 240) || "Core services not listed in source.";
+      const category = categorize(`${linkText} ${serviceSummary} ${root}`);
       domainMap.set(root, {
         domain: root,
         name: linkText.slice(0, 120),
-        category: categorize(linkText + " " + root),
+        business_name: linkText.slice(0, 120),
+        service_summary: serviceSummary,
+        category,
+        source: sourceType === "exhibition" ? "exhibition" : "b2b",
         source_page_url: linkedUrl.toString(),
       });
     }
@@ -177,6 +197,9 @@ async function fetchWithTimeout(url: string, timeoutMs = 12000): Promise<string 
       redirect: "follow",
     });
     if (!res.ok) return null;
+    const requestedHost = new URL(url).hostname.toLowerCase();
+    const finalHost = new URL(res.url).hostname.toLowerCase();
+    if (finalHost !== requestedHost && !finalHost.endsWith(`.${requestedHost}`)) return null;
     return await res.text();
   } catch { return null; } finally { clearTimeout(t); }
 }
@@ -184,7 +207,20 @@ async function fetchWithTimeout(url: string, timeoutMs = 12000): Promise<string 
 interface ListingInspection {
   source_url: string;
   source_type: string;
+  intent: string;
   domains: ExtractedDomain[];
+}
+
+function inferDirectoryIntent(html: string): string {
+  const metadata = [
+    html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1],
+    html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i)?.[1],
+    html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1],
+  ].filter(Boolean).join(" ").replace(/<[^>]*>/g, " ").toLowerCase();
+  return Object.entries(CATEGORY_KEYWORDS)
+    .filter(([, keywords]) => keywords.some((keyword) => metadata.includes(keyword)))
+    .map(([category]) => category)
+    .join(" ");
 }
 
 function isSameSite(url: URL, siteHost: string): boolean {
@@ -215,19 +251,21 @@ async function fetchPage(url: URL): Promise<string | null> {
   return await fetchWithTimeout(httpUrl.toString());
 }
 
-async function inspectListing(url: URL): Promise<ListingInspection | null> {
+async function inspectListing(url: URL, requestedIntent = ""): Promise<ListingInspection | null> {
   if (!isDesignatedTargetUrl(url)) return null;
   const html = await fetchPage(url);
   if (!html) return null;
   const listingHtml = stripNonContentHtml(html);
   const sourceType = detectSourceType(listingHtml);
   if (sourceType === "generic") return null;
-  const domains = extractDomainsFromHtml(listingHtml, url.toString());
+  const extracted = extractDomainsFromHtml(listingHtml, url.toString(), sourceType);
+  const intent = requestedIntent.trim().slice(0, 200) || inferDirectoryIntent(listingHtml);
+  const domains = await filterRelevantCompanies(intent, extracted);
   if (domains.length === 0) return null;
-  return { source_url: url.toString(), source_type: sourceType, domains };
+  return { source_url: url.toString(), source_type: sourceType, intent, domains };
 }
 
-async function locateDirectories(inputUrl: URL): Promise<ListingInspection[]> {
+async function locateDirectories(inputUrl: URL, intent: string): Promise<ListingInspection[]> {
   const candidates = new Map<string, URL>();
   if (isDesignatedTargetUrl(inputUrl)) {
     inputUrl.hash = "";
@@ -254,7 +292,7 @@ async function locateDirectories(inputUrl: URL): Promise<ListingInspection[]> {
   }
 
   const inspections = await Promise.all(
-    Array.from(candidates.values()).slice(0, 16).map((candidate) => inspectListing(candidate))
+    Array.from(candidates.values()).slice(0, 16).map((candidate) => inspectListing(candidate, intent))
   );
   return inspections.filter((inspection): inspection is ListingInspection => inspection !== null)
     .sort((left, right) => right.domains.length - left.domains.length);
@@ -293,6 +331,7 @@ Deno.serve(async (req: Request) => {
 
     const body = await req.json();
     const action = body.action === "extract" ? "extract" : "preview";
+    const intent = typeof body.intent === "string" ? body.intent.trim().slice(0, 200) : "";
     const source = typeof body.url === "string" ? body.url.trim() : "";
     if (!source) {
       return new Response(JSON.stringify({ error: "Enter a website domain or directory URL." }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -310,7 +349,7 @@ Deno.serve(async (req: Request) => {
     }
 
     if (action === "preview") {
-      const inspections = await locateDirectories(inputUrl);
+      const inspections = await locateDirectories(inputUrl, intent);
       if (inspections.length === 0) {
         return new Response(JSON.stringify({ error: "No validated exhibitor, participant, vendor, seller, supplier, or distributor directory was found on this site." }), { status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" } });
       }
@@ -318,6 +357,7 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({
         directory_url: directory.source_url,
         source_type: directory.source_type,
+        intent: directory.intent,
         total_listings: directory.domains.length,
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
@@ -330,7 +370,7 @@ Deno.serve(async (req: Request) => {
     if (!isSameSite(selectedDirectory, inputUrl.hostname) || !isDesignatedTargetUrl(selectedDirectory)) {
       return new Response(JSON.stringify({ error: "The selected URL is not a validated directory on this site." }), { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
-    const confirmedDirectory = await inspectListing(selectedDirectory);
+    const confirmedDirectory = await inspectListing(selectedDirectory, intent);
     if (!confirmedDirectory) {
       return new Response(JSON.stringify({ error: "The directory changed or no longer contains valid listing records. No domains were saved." }), { status: 422, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
@@ -360,7 +400,16 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ error: "Failed to save parsing run" }), { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    const rows = confirmedDirectory.domains.map((domain) => ({ run_id: run.id, user_id: userId, domain: domain.domain, name: domain.name, category: domain.category, source_page_url: domain.source_page_url }));
+    const rows = confirmedDirectory.domains.map((domain) => ({
+      run_id: run.id,
+      user_id: userId,
+      domain: domain.domain,
+      name: domain.name,
+      business_name: domain.business_name,
+      service_summary: domain.service_summary,
+      category: domain.category,
+      source_page_url: domain.source_page_url,
+    }));
     const { error: resultsError } = await supabase.from("domain_parse_results").insert(rows);
     if (resultsError) {
       await supabase.from("domain_parsing_runs").delete().eq("id", run.id).eq("user_id", userId);
@@ -371,6 +420,7 @@ Deno.serve(async (req: Request) => {
       run_id: run.id,
       source_url: confirmedDirectory.source_url,
       source_type: confirmedDirectory.source_type,
+      intent: confirmedDirectory.intent,
       total_domains: confirmedDirectory.domains.length,
       credits_remaining: creditResult.total_remaining,
       domains: confirmedDirectory.domains,

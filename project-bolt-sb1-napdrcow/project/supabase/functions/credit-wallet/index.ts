@@ -13,6 +13,31 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
+const paygPricingTiers = [
+  { credits: 1000, amount: 1000 },
+  { credits: 5000, amount: 4000 },
+  { credits: 10000, amount: 7000 },
+  { credits: 25000, amount: 15000 },
+  { credits: 50000, amount: 28000 },
+  { credits: 100000, amount: 52000 },
+  { credits: 250000, amount: 125000 },
+];
+
+function priceForCredits(credits: number): number {
+  for (let index = 1; index < paygPricingTiers.length; index += 1) {
+    const lower = paygPricingTiers[index - 1];
+    const upper = paygPricingTiers[index];
+    if (credits <= upper.credits) {
+      const progress = (credits - lower.credits) / (upper.credits - lower.credits);
+      return Math.ceil(lower.amount + progress * (upper.amount - lower.amount));
+    }
+  }
+  const lower = paygPricingTiers[paygPricingTiers.length - 2];
+  const upper = paygPricingTiers[paygPricingTiers.length - 1];
+  const rate = (upper.amount - lower.amount) / (upper.credits - lower.credits);
+  return Math.ceil(upper.amount + (credits - upper.credits) * rate);
+}
+
 function bytesToHex(bytes: ArrayBuffer): string {
   return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -73,21 +98,37 @@ Deno.serve(async (req: Request) => {
 
     const body = JSON.parse(rawBody);
     if (body.action === "initialize") {
-      const amountMajor = Number(body.amount ?? body.amountMinor ? Number(body.amountMinor) / 100 : 0);
       const bundleType = body.bundleType === "monthly" ? "monthly" : "bundle";
-      const creditsPerUnit = Number(Deno.env.get("CREDITS_PER_CURRENCY_UNIT") ?? 10);
       const currency = (Deno.env.get("PAYSTACK_CURRENCY") ?? "NGN").toUpperCase();
       const appUrl = Deno.env.get("APP_URL");
+      const requestedCredits = Number(body.credits);
+      let amountMajor: number;
+      let credits: number;
+      if (bundleType === "monthly") {
+        if (Number(body.amount) !== 25000 || requestedCredits !== 1000000) {
+          return jsonResponse({ error: "The monthly plan is a fixed 25,000 currency units for 1,000,000 credits." }, 400);
+        }
+        amountMajor = 25000;
+        credits = 1000000;
+      } else {
+        if (!Number.isInteger(requestedCredits) || requestedCredits < 1000 || requestedCredits > 2000000) {
+          return jsonResponse({ error: "Choose between 1,000 and 2,000,000 Pay As You Go credits." }, 400);
+        }
+        amountMajor = priceForCredits(requestedCredits);
+        if (body.amount !== undefined && Number(body.amount) !== amountMajor) {
+          return jsonResponse({ error: "The Pay As You Go price does not match the credit amount." }, 400);
+        }
+        credits = requestedCredits;
+      }
       if (!Number.isFinite(amountMajor) || amountMajor < 50 || amountMajor > 10000000) {
         return jsonResponse({ error: "Enter a whole-number wallet amount between 50 and 10,000,000." }, 400);
       }
-      if (!Number.isInteger(creditsPerUnit) || creditsPerUnit < 1 || !appUrl) {
-        return jsonResponse({ error: "Set CREDITS_PER_CURRENCY_UNIT and APP_URL before enabling wallet funding." }, 503);
+      if (!appUrl) {
+        return jsonResponse({ error: "Set APP_URL before enabling wallet funding." }, 503);
       }
 
       const reference = `mh_${crypto.randomUUID()}`;
       const amountMinor = Math.round(amountMajor * 100);
-      const credits = bundleType === "monthly" ? 1000000 : Math.max(1, Math.round(amountMajor * creditsPerUnit));
       if (!Number.isSafeInteger(credits) || credits < 1 || credits > 2000000000) {
         return jsonResponse({ error: "The selected amount exceeds the configured wallet credit limit." }, 400);
       }
@@ -114,7 +155,7 @@ Deno.serve(async (req: Request) => {
           currency,
           reference,
           callback_url: callbackUrl.toString(),
-          metadata: { user_id: user.id, credits },
+          metadata: { user_id: user.id, credits, bundle_type: bundleType },
         }),
       });
       const initialized = await initResponse.json();

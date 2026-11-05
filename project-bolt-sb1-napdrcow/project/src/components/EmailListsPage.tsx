@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Download, FolderPlus, Loader2, Mail, Plus, Printer, Search, Trash2 } from "lucide-react";
+import { Download, Filter, FolderPlus, Loader2, Mail, Plus, Printer, Search, Trash2, Users } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/auth";
 
@@ -11,6 +11,7 @@ interface Contact {
   last_seen_at: string;
   last_sent_at: string | null;
   suppressed_at: string | null;
+  replied_at: string | null;
 }
 
 interface EmailList {
@@ -40,27 +41,30 @@ export function EmailListsPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+  const [domainFilter, setDomainFilter] = useState("");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [sort, setSort] = useState<"email" | "newest" | "oldest">("newest");
   const [page, setPage] = useState(0);
   const [total, setTotal] = useState(0);
+  const [uniqueTotal, setUniqueTotal] = useState(0);
   const [newListName, setNewListName] = useState("");
   const [targetList, setTargetList] = useState("");
   const [notice, setNotice] = useState("");
 
   const makeQuery = useCallback(() => {
     let query = supabase.from("email_contacts").select(
-      "id,email,domain,first_seen_at,last_seen_at,last_sent_at,suppressed_at",
+      "id,email,domain,first_seen_at,last_seen_at,last_sent_at,suppressed_at,replied_at",
       { count: "exact" }
     );
     if (search.trim()) query = query.or(`email.ilike.%${search.trim()}%,domain.ilike.%${search.trim()}%`);
+    if (domainFilter.trim()) query = query.eq("domain", domainFilter.trim().toLowerCase());
     if (fromDate) query = query.gte("last_seen_at", new Date(`${fromDate}T00:00:00`).toISOString());
     if (toDate) query = query.lte("last_seen_at", new Date(`${toDate}T23:59:59.999`).toISOString());
     if (sort === "email") query = query.order("email", { ascending: true });
     else query = query.order("last_seen_at", { ascending: sort === "oldest" });
     return query;
-  }, [search, fromDate, toDate, sort]);
+  }, [search, domainFilter, fromDate, toDate, sort]);
 
   const loadLists = async () => {
     const { data } = await supabase.from("email_lists").select("id,name,created_at").order("name");
@@ -70,13 +74,14 @@ export function EmailListsPage() {
   const loadContacts = useCallback(async () => {
     setLoading(true);
     setError("");
-    const { data, count, error: loadError } = await makeQuery().range(
-      page * PAGE_SIZE,
-      (page + 1) * PAGE_SIZE - 1
-    );
-    if (loadError) setError(loadError.message);
-    setContacts((data as Contact[]) ?? []);
-    setTotal(count ?? 0);
+    const [filteredResult, uniqueResult] = await Promise.all([
+      makeQuery().range(page * PAGE_SIZE, (page + 1) * PAGE_SIZE - 1),
+      supabase.from("email_contacts").select("id", { count: "exact", head: true }),
+    ]);
+    if (filteredResult.error || uniqueResult.error) setError(filteredResult.error?.message ?? uniqueResult.error?.message ?? "Could not load contacts.");
+    setContacts((filteredResult.data as Contact[]) ?? []);
+    setTotal(filteredResult.count ?? 0);
+    setUniqueTotal(uniqueResult.count ?? 0);
     setLoading(false);
   }, [page, makeQuery]);
 
@@ -138,6 +143,61 @@ export function EmailListsPage() {
     else setNotice(`Added ${rows.length} contact${rows.length === 1 ? "" : "s"} to the list.`);
   };
 
+  const selectAllFiltered = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const ids: string[] = [];
+      for (let offset = 0; offset < total; offset += 1000) {
+        const { data, error: selectError } = await makeQuery().range(offset, offset + 999);
+        if (selectError) throw selectError;
+        ids.push(...((data as Contact[] | null) ?? []).map((contact) => contact.id));
+      }
+      setSelected(new Set(ids));
+      setNotice(`Selected all ${ids.length.toLocaleString()} contacts matching these filters.`);
+    } catch (selectError) {
+      setError(selectError instanceof Error ? selectError.message : "Could not select the filtered contacts.");
+    }
+    setBusy(false);
+  };
+
+  const createListFromFiltered = async () => {
+    if (!user || !newListName.trim()) return;
+    setBusy(true);
+    setError("");
+    setNotice("");
+    let createdList: EmailList | null = null;
+    try {
+      const rows = await exportRows();
+      if (rows.length === 0) throw new Error("No contacts match the current filters.");
+      const { data, error: createError } = await supabase.from("email_lists")
+        .insert({ user_id: user.id, name: newListName.trim() })
+        .select("id,name,created_at").single();
+      if (createError) throw createError;
+      createdList = data as EmailList;
+
+      for (let offset = 0; offset < rows.length; offset += 500) {
+        const relations = rows.slice(offset, offset + 500).map((contact) => ({
+          user_id: user.id,
+          list_id: createdList!.id,
+          contact_id: contact.id,
+        }));
+        const { error: addError } = await supabase.from("email_list_contacts")
+          .upsert(relations, { onConflict: "list_id,contact_id", ignoreDuplicates: true });
+        if (addError) throw addError;
+      }
+
+      setLists((current) => [...current, createdList!].sort((a, b) => a.name.localeCompare(b.name)));
+      setTargetList(createdList.id);
+      setNewListName("");
+      setNotice(`Created "${createdList.name}" with ${rows.length.toLocaleString()} filtered contacts.`);
+    } catch (createError) {
+      if (createdList) await supabase.from("email_lists").delete().eq("id", createdList.id);
+      setError(createError instanceof Error ? createError.message : "Could not save this filtered list.");
+    }
+    setBusy(false);
+  };
+
   const exportRows = async () => {
     const rows: Contact[] = [];
     for (let offset = 0; offset < total; offset += 1000) {
@@ -154,10 +214,10 @@ export function EmailListsPage() {
     try {
       const rows = await exportRows();
       const csv = [
-        ["Email", "Domain", "First seen", "Last seen", "Last sent", "Suppressed"].map(escapeCsv).join(","),
+        ["Email", "Domain", "First seen", "Last seen", "Last sent", "Replied", "Suppressed"].map(escapeCsv).join(","),
         ...rows.map((contact) => [
           contact.email, contact.domain ?? "", contact.first_seen_at, contact.last_seen_at,
-          contact.last_sent_at ?? "", contact.suppressed_at ?? "",
+          contact.last_sent_at ?? "", contact.replied_at ?? "", contact.suppressed_at ?? "",
         ].map(escapeCsv).join(",")),
       ].join("\r\n");
       const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
@@ -182,7 +242,7 @@ export function EmailListsPage() {
     setError("");
     try {
       const rows = await exportRows();
-      printWindow.document.write(`<!doctype html><title>MailHarvest email list</title><style>body{font:12px Arial,sans-serif;color:#111;padding:24px}h1{font-size:20px}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd;overflow-wrap:anywhere}th{background:#f2f2f2}@media print{body{padding:0}}</style><h1>Email contacts (${rows.length})</h1><table><thead><tr><th>Email</th><th>Domain</th><th>Last seen</th></tr></thead><tbody>${rows.map((contact) => `<tr><td>${escapeHtml(contact.email)}</td><td>${escapeHtml(contact.domain ?? "")}</td><td>${escapeHtml(new Date(contact.last_seen_at).toLocaleString())}</td></tr>`).join("")}</tbody></table>`);
+      printWindow.document.write(`<!doctype html><title>MailHarvest email list</title><style>body{font:12px Arial,sans-serif;color:#111;padding:24px}h1{font-size:20px}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:7px;border-bottom:1px solid #ddd;overflow-wrap:anywhere}th{background:#f2f2f2}@media print{body{padding:0}}</style><h1>Email contacts (${rows.length})</h1><table><thead><tr><th>Email</th><th>Domain</th><th>Last seen</th><th>Replied</th></tr></thead><tbody>${rows.map((contact) => `<tr><td>${escapeHtml(contact.email)}</td><td>${escapeHtml(contact.domain ?? "")}</td><td>${escapeHtml(new Date(contact.last_seen_at).toLocaleString())}</td><td>${escapeHtml(contact.replied_at ? new Date(contact.replied_at).toLocaleString() : "No")}</td></tr>`).join("")}</tbody></table>`);
       printWindow.document.close();
       printWindow.focus();
       printWindow.print();
@@ -204,7 +264,7 @@ export function EmailListsPage() {
       <div className="flex flex-wrap items-end justify-between gap-4 mb-8">
         <div>
           <h1 className="text-3xl font-bold mb-2">Email lists</h1>
-          <p className="text-neutral-600">A searchable directory of {total.toLocaleString()} unique scraped contacts.</p>
+          <p className="text-neutral-600">Search, segment, and save scraped contacts for targeted campaigns.</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button onClick={exportCsv} disabled={busy || total === 0} className="inline-flex items-center gap-2 px-4 py-2.5 border border-neutral-200 bg-white rounded-lg text-sm font-medium disabled:opacity-50">
@@ -216,6 +276,11 @@ export function EmailListsPage() {
         </div>
       </div>
 
+      <section aria-label="Contact summary" className="mb-6 flex flex-wrap items-center justify-between gap-4 rounded-lg border border-neutral-200 bg-white p-5">
+        <div className="flex items-center gap-3"><div className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary-50 text-primary-700"><Users size={20} /></div><div><p className="text-sm font-medium text-neutral-500">Unique scraped contacts</p><p className="mt-1 text-2xl font-semibold text-neutral-900">{uniqueTotal.toLocaleString()}</p></div></div>
+        <p className="text-sm text-neutral-500">{total.toLocaleString()} match the current filters</p>
+      </section>
+
       {error && <p role="alert" className="mb-4 p-3 border border-red-300 bg-red-50 text-red-700 rounded-lg text-sm">{error}</p>}
       {notice && <p role="status" className="mb-4 p-3 border border-green-300 bg-green-50 text-green-800 rounded-lg text-sm">{notice}</p>}
 
@@ -224,7 +289,11 @@ export function EmailListsPage() {
           <div className="flex flex-wrap gap-3 mb-4">
             <label className="relative flex-1 min-w-56">
               <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
-              <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="Search email or domain" className="w-full pl-9 pr-3 py-2.5 border border-neutral-200 rounded-lg text-sm" />
+              <input value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} placeholder="Search email or keyword" className="w-full pl-9 pr-3 py-2.5 border border-neutral-200 rounded-lg text-sm" />
+            </label>
+            <label className="relative flex-1 min-w-48">
+              <Filter size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
+              <input value={domainFilter} onChange={(event) => { setDomainFilter(event.target.value); setPage(0); }} placeholder="Exact domain" className="w-full pl-9 pr-3 py-2.5 border border-neutral-200 rounded-lg text-sm" />
             </label>
             <label className="text-xs text-neutral-500">From <input type="date" value={fromDate} onChange={(event) => { setFromDate(event.target.value); setPage(0); }} className="block mt-1 px-2 py-2 border border-neutral-200 rounded-lg text-sm text-neutral-800" /></label>
             <label className="text-xs text-neutral-500">Through <input type="date" value={toDate} onChange={(event) => { setToDate(event.target.value); setPage(0); }} className="block mt-1 px-2 py-2 border border-neutral-200 rounded-lg text-sm text-neutral-800" /></label>
@@ -237,7 +306,7 @@ export function EmailListsPage() {
 
           <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
             <label className="inline-flex items-center gap-2 text-sm text-neutral-600"><input type="checkbox" checked={contacts.length > 0 && contacts.every((contact) => selected.has(contact.id))} onChange={selectVisible} /> Select page</label>
-            <span className="text-sm text-neutral-500">{selected.size} selected</span>
+            <div className="flex flex-wrap items-center gap-3"><button onClick={() => void selectAllFiltered()} disabled={busy || loading || total === 0} className="text-sm font-medium text-primary-700 hover:text-primary-800 disabled:opacity-50">Select all filtered contacts</button><span className="text-sm text-neutral-500">{selected.size.toLocaleString()} selected</span></div>
           </div>
 
           <div className="overflow-x-auto border border-neutral-200 rounded-lg bg-white">
@@ -251,7 +320,7 @@ export function EmailListsPage() {
                     <td className="p-3 font-mono text-neutral-800">{contact.email}</td>
                     <td className="p-3 text-neutral-600">{contact.domain ?? "-"}</td>
                     <td className="p-3 text-neutral-600 whitespace-nowrap">{new Date(contact.last_seen_at).toLocaleDateString()}</td>
-                    <td className="p-3 text-xs">{contact.suppressed_at ? <span className="text-red-600">Suppressed</span> : contact.last_sent_at ? <span className="text-neutral-500">Previously sent</span> : <span className="text-green-700">Not sent</span>}</td>
+                    <td className="p-3 text-xs">{contact.replied_at ? <span className="font-medium text-blue-700">Replied</span> : contact.suppressed_at ? <span className="text-red-600">Suppressed</span> : contact.last_sent_at ? <span className="text-neutral-500">Previously sent</span> : <span className="text-green-700">Not sent</span>}</td>
                   </tr>)}
               </tbody>
             </table>
@@ -269,6 +338,7 @@ export function EmailListsPage() {
             <input value={newListName} onChange={(event) => setNewListName(event.target.value)} onKeyDown={(event) => event.key === "Enter" && void createList()} placeholder="New list name" className="min-w-0 flex-1 px-3 py-2 border border-neutral-200 rounded-lg text-sm" />
             <button onClick={createList} disabled={busy || !newListName.trim()} title="Create list" aria-label="Create list" className="p-2.5 bg-primary-600 text-white rounded-lg disabled:opacity-50"><Plus size={18} /></button>
           </div>
+          <button onClick={() => void createListFromFiltered()} disabled={busy || loading || !newListName.trim() || total === 0} className="mb-5 inline-flex w-full items-center justify-center gap-2 rounded-lg border border-primary-200 bg-primary-50 px-3 py-2 text-sm font-medium text-primary-700 disabled:opacity-50"><FolderPlus size={16} />Create list from filtered contacts</button>
           <div className="flex gap-2 mb-5">
             <select value={targetList} onChange={(event) => setTargetList(event.target.value)} className="min-w-0 flex-1 px-3 py-2 border border-neutral-200 rounded-lg bg-white text-sm">
               <option value="">Choose a list</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}

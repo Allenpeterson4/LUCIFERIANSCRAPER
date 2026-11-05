@@ -4,6 +4,7 @@ export interface DirectoryPreview {
   directory_url: string;
   source_type: string;
   total_listings: number;
+  intent: string;
 }
 
 async function callParseFunction<T>(body: Record<string, string>, accessToken: string): Promise<T> {
@@ -36,14 +37,15 @@ async function callParseFunction<T>(body: Record<string, string>, accessToken: s
   return data as T;
 }
 
-export function previewDomainDirectory(url: string, accessToken: string): Promise<DirectoryPreview> {
-  return callParseFunction<DirectoryPreview>({ action: "preview", url }, accessToken);
+export function previewDomainDirectory(url: string, accessToken: string, intent = ""): Promise<DirectoryPreview> {
+  return callParseFunction<DirectoryPreview>({ action: "preview", url, intent }, accessToken);
 }
 
 export function extractDomainDirectory(
   url: string,
   directoryUrl: string,
   accessToken: string,
+  intent = "",
 ): Promise<ParseDomainsResponse> {
-  return callParseFunction<ParseDomainsResponse>({ action: "extract", url, directory_url: directoryUrl }, accessToken);
+  return callParseFunction<ParseDomainsResponse>({ action: "extract", url, directory_url: directoryUrl, intent }, accessToken);
 }

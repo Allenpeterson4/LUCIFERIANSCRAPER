@@ -1,8 +1,19 @@
+export interface CompanyRecord {
+  business_name: string;
+  domain: string;
+  service_summary: string;
+  category: string;
+  source: "maps" | "website" | "exhibition" | "b2b";
+}
+
 export interface ScrapeResult {
   id: string;
   run_id: string;
   user_id: string;
   domain: string;
+  business_name?: string | null;
+  service_summary?: string | null;
+  category?: string | null;
   emails: string[];
   status: string;
   pages_scanned: number;
@@ -33,8 +44,7 @@ export interface ScrapeEdgeResponse {
   run_id: string;
   total_emails: number;
   domains_scraped: number;
-  results: Array<{
-    domain: string;
+  results: Array<CompanyRecord & {
     emails: string[];
     status: string;
     pages_scanned: number;
@@ -58,6 +68,9 @@ export interface DomainParseResult {
   user_id: string;
   domain: string;
   name: string | null;
+  business_name?: string | null;
+  service_summary?: string | null;
+  source?: "exhibition" | "b2b";
   category: string | null;
   source_page_url: string | null;
   created_at: string;
@@ -67,11 +80,10 @@ export interface ParseDomainsResponse {
   run_id: string;
   source_url: string;
   source_type: string;
+  intent: string;
   total_domains: number;
-  domains: Array<{
-    domain: string;
+  domains: Array<CompanyRecord & {
     name: string | null;
-    category: string;
     source_page_url: string | null;
   }>;
 }

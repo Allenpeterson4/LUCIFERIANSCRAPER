@@ -20,21 +20,47 @@ interface WalletPayment {
   paid_at: string | null;
 }
 
-const bundleOptions = [
-  { label: "1,000 credits", amount: 1000, credits: 1000 },
-  { label: "5,000 credits", amount: 4000, credits: 5000 },
-  { label: "10,000 credits", amount: 7000, credits: 10000 },
-  { label: "25,000 credits", amount: 15000, credits: 25000 },
-  { label: "50,000 credits", amount: 28000, credits: 50000 },
-  { label: "100,000 credits", amount: 52000, credits: 100000 },
+interface CreditSubscription {
+  credits_remaining: number;
+  starts_at: string;
+  expires_at: string;
+}
+
+const paygPricingTiers = [
+  { credits: 1000, amount: 1000 },
+  { credits: 5000, amount: 4000 },
+  { credits: 10000, amount: 7000 },
+  { credits: 25000, amount: 15000 },
+  { credits: 50000, amount: 28000 },
+  { credits: 100000, amount: 52000 },
+  { credits: 250000, amount: 125000 },
 ];
+
+const minPaygCredits = 1000;
+const maxPaygCredits = 2000000;
+
+function priceForCredits(credits: number): number {
+  for (let index = 1; index < paygPricingTiers.length; index += 1) {
+    const lower = paygPricingTiers[index - 1];
+    const upper = paygPricingTiers[index];
+    if (credits <= upper.credits) {
+      const progress = (credits - lower.credits) / (upper.credits - lower.credits);
+      return Math.ceil(lower.amount + progress * (upper.amount - lower.amount));
+    }
+  }
+  const lower = paygPricingTiers[paygPricingTiers.length - 2];
+  const upper = paygPricingTiers[paygPricingTiers.length - 1];
+  const rate = (upper.amount - lower.amount) / (upper.credits - lower.credits);
+  return Math.ceil(upper.amount + (credits - upper.credits) * rate);
+}
 
 const monthlyPlan = { label: "Monthly unlimited", amount: 25000, credits: 1000000, days: 30 };
 
 export function CreditWalletPage() {
   const [balance, setBalance] = useState<CreditBalance | null>(null);
   const [payments, setPayments] = useState<WalletPayment[]>([]);
-  const [selectedBundle, setSelectedBundle] = useState<typeof bundleOptions[number]>(bundleOptions[0]);
+  const [subscriptions, setSubscriptions] = useState<CreditSubscription[]>([]);
+  const [paygCredits, setPaygCredits] = useState(minPaygCredits);
   const [loading, setLoading] = useState(true);
   const [funding, setFunding] = useState(false);
   const [checkingPayment, setCheckingPayment] = useState(false);
@@ -42,17 +68,21 @@ export function CreditWalletPage() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const currency = (import.meta.env.VITE_PAYSTACK_CURRENCY as string | undefined) ?? "NGN";
+  const paygAmount = priceForCredits(paygCredits);
 
   const loadWallet = useCallback(async () => {
     setLoading(true);
-    const [balanceResult, paymentsResult] = await Promise.all([
+    const [balanceResult, paymentsResult, subscriptionsResult] = await Promise.all([
       supabase.rpc("get_my_credit_balance"),
       supabase.from("wallet_payments").select("reference,amount_minor,currency,credits,status,created_at,paid_at")
         .order("created_at", { ascending: false }).limit(50),
+      supabase.from("credit_subscriptions").select("credits_remaining,starts_at,expires_at")
+        .gt("expires_at", new Date().toISOString()).order("starts_at", { ascending: true }),
     ]);
     const balanceData = Array.isArray(balanceResult.data) ? balanceResult.data[0] : balanceResult.data;
     setBalance((balanceData as CreditBalance | null) ?? null);
     setPayments((paymentsResult.data as WalletPayment[]) ?? []);
+    setSubscriptions((subscriptionsResult.data as CreditSubscription[]) ?? []);
     setLoading(false);
   }, []);
 
@@ -92,10 +122,10 @@ export function CreditWalletPage() {
     const { data, error: invokeError } = await supabase.functions.invoke("credit-wallet", {
       body: {
         action: "initialize",
-        amount: selectedBundle.amount,
-        amountMinor: selectedBundle.amount * 100,
+        amount: paygAmount,
+        amountMinor: paygAmount * 100,
         bundleType: "bundle",
-        credits: selectedBundle.credits,
+        credits: paygCredits,
       },
     });
     setFunding(false);
@@ -128,6 +158,9 @@ export function CreditWalletPage() {
     window.location.assign(data.authorization_url as string);
   };
 
+  const activeSubscription = subscriptions.find((subscription) => new Date(subscription.starts_at) <= new Date());
+  const nextSubscription = subscriptions.find((subscription) => new Date(subscription.starts_at) > new Date());
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10 animate-fade-in">
       <header className="mb-8">
@@ -141,34 +174,32 @@ export function CreditWalletPage() {
 
       {loading ? <div className="py-16 text-center text-neutral-500"><Loader2 className="animate-spin mx-auto mb-2" size={22} />Loading wallet</div> : <>
         <section className="grid gap-4 sm:grid-cols-3 mb-8">
-          <div className="border border-neutral-200 bg-white rounded-lg p-5"><p className="text-sm text-neutral-500">Total available</p><p className="mt-2 text-3xl font-bold text-primary-700">{(balance?.total_remaining ?? 0).toLocaleString()}</p></div>
-          <div className="border border-neutral-200 bg-white rounded-lg p-5"><p className="text-sm text-neutral-500">Daily credits remaining</p><p className="mt-2 text-3xl font-bold">{(balance?.daily_remaining ?? 0).toLocaleString()}<span className="ml-1 text-sm font-normal text-neutral-500">/ {(balance?.daily_allowance ?? 1000).toLocaleString()}</span></p><p className="mt-2 text-xs text-neutral-500">Resets {balance?.resets_at ? new Date(balance.resets_at).toLocaleString() : "daily at 00:00 UTC"}</p></div>
-          <div className="border border-neutral-200 bg-white rounded-lg p-5"><p className="text-sm text-neutral-500">Purchased credits</p><p className="mt-2 text-3xl font-bold">{(balance?.purchased_credits ?? 0).toLocaleString()}</p></div>
+          <div className="border border-neutral-200 bg-white rounded-lg p-5"><p className="text-sm text-neutral-500">Total Available Credits</p><p className="mt-2 text-3xl font-bold text-primary-700">{(balance?.total_remaining ?? 0).toLocaleString()}</p></div>
+          <div className="border border-neutral-200 bg-white rounded-lg p-5"><p className="text-sm text-neutral-500">Daily Credits</p><p className="mt-2 text-3xl font-bold">{(balance?.daily_remaining ?? 0).toLocaleString()}<span className="ml-1 text-sm font-normal text-neutral-500">/ {(balance?.daily_allowance ?? 1000).toLocaleString()}</span></p><p className="mt-2 text-xs text-neutral-500">Resets {balance?.resets_at ? new Date(balance.resets_at).toLocaleString() : "daily at 00:00 UTC"}</p></div>
+          <div className="border border-neutral-200 bg-white rounded-lg p-5"><p className="text-sm text-neutral-500">Purchased + Monthly Credits</p><p className="mt-2 text-3xl font-bold">{((balance?.purchased_credits ?? 0) + (activeSubscription?.credits_remaining ?? 0)).toLocaleString()}</p><p className="mt-2 text-xs text-neutral-500">{(balance?.purchased_credits ?? 0).toLocaleString()} purchased · {(activeSubscription?.credits_remaining ?? 0).toLocaleString()} monthly{activeSubscription ? ` · expires ${new Date(activeSubscription.expires_at).toLocaleDateString()}` : nextSubscription ? ` · plan starts ${new Date(nextSubscription.starts_at).toLocaleDateString()}` : ""}</p></div>
         </section>
 
         <section className="grid gap-6 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)] items-start">
           <div className="border border-neutral-200 bg-white rounded-lg p-5">
-            <h2 className="font-semibold flex items-center gap-2"><Wallet size={17} />Fund wallet</h2>
-            <p className="mt-2 text-sm text-neutral-600">Secure checkout through Paystack. Credits are added after payment verification.</p>
+            <h2 className="font-semibold flex items-center gap-2"><Wallet size={17} />Pay As You Go</h2>
+            <p className="mt-2 text-sm text-neutral-600">Choose a credit amount. Pricing updates automatically; Paystack charges only after you confirm.</p>
 
             <div className="mt-5 space-y-3">
-              <div className="grid gap-2 sm:grid-cols-2">
-                {bundleOptions.map((bundle) => <button key={bundle.label} type="button" onClick={() => setSelectedBundle(bundle)} className={`rounded-lg border p-3 text-left ${selectedBundle.label === bundle.label ? "border-primary-300 bg-primary-50" : "border-neutral-200 bg-white"}`}>
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-sm font-medium">{bundle.label}</span>
-                    <span className="text-xs text-neutral-500">{currency} {bundle.amount.toLocaleString()}</span>
-                  </div>
-                </button>)}
-              </div>
               <form onSubmit={startFunding} className="space-y-3">
+                <label className="block text-sm font-medium">Credits to purchase
+                  <input type="number" min={minPaygCredits} max={maxPaygCredits} step={1000} value={paygCredits} onChange={(event) => {
+                    const value = Number(event.target.value);
+                    setPaygCredits(Number.isFinite(value) ? Math.min(maxPaygCredits, Math.max(minPaygCredits, value)) : minPaygCredits);
+                  }} className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg text-sm" />
+                </label>
                 <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
-                  <p className="text-xs uppercase tracking-wide text-neutral-500">Selected bundle</p>
-                  <p className="mt-1 text-lg font-semibold">{selectedBundle.label}</p>
-                  <p className="text-sm text-neutral-600">{currency} {selectedBundle.amount.toLocaleString()} · {selectedBundle.credits.toLocaleString()} credits</p>
+                  <p className="text-xs uppercase tracking-wide text-neutral-500">Automatic price</p>
+                  <p className="mt-1 text-lg font-semibold">{currency} {paygAmount.toLocaleString()}</p>
+                  <p className="text-sm text-neutral-600">{paygCredits.toLocaleString()} credits · tiered rates improve with larger amounts</p>
                 </div>
                 <button disabled={funding} className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary-600 text-white rounded-lg text-sm font-medium disabled:opacity-50">
                   {funding ? <Loader2 className="animate-spin" size={16} /> : <Coins size={16} />}
-                  Buy bundle via Paystack
+                  Continue to Paystack
                 </button>
               </form>
             </div>
@@ -179,7 +210,7 @@ export function CreditWalletPage() {
                 <div className="mt-2 flex items-center justify-between gap-3">
                   <div>
                     <p className="text-lg font-semibold">{monthlyPlan.label}</p>
-                    <p className="text-sm text-neutral-600">Up to {monthlyPlan.credits.toLocaleString()} credits included until the plan expires.</p>
+                    <p className="text-sm text-neutral-600">{monthlyPlan.credits.toLocaleString()} credits available during each 30-day plan period.</p>
                   </div>
                   <button type="button" onClick={() => void startMonthlyPlan()} className="inline-flex items-center gap-2 px-3 py-2 border border-primary-300 bg-white rounded-lg text-sm font-medium text-primary-700 disabled:opacity-50">
                     {funding ? <Loader2 className="animate-spin" size={15} /> : <Coins size={15} />}

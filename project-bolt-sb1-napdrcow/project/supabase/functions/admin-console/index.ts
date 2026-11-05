@@ -13,6 +13,28 @@ function response(body: unknown, status = 200) {
   });
 }
 
+const SEARCH_SECRET_NAMES = ["google_maps_api_key", "google_cse_api_key", "google_cse_id"] as const;
+
+async function getSearchServiceStatus() {
+  const serviceClient = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  const { data } = await serviceClient.from("search_service_secrets").select("name").in("name", [...SEARCH_SECRET_NAMES]);
+  const configured = new Set((data ?? []).map((item) => item.name));
+  const mapsEnvironment = Boolean(Deno.env.get("GOOGLE_MAPS_API_KEY"));
+  const cseEnvironment = Boolean(Deno.env.get("GOOGLE_CSE_API_KEY"));
+  const cseIdEnvironment = Boolean(Deno.env.get("GOOGLE_CSE_ID"));
+  const mapsDatabase = configured.has("google_maps_api_key");
+  const cseDatabase = configured.has("google_cse_api_key");
+  const cseIdDatabase = configured.has("google_cse_id");
+  return {
+    google_maps_api_key: mapsDatabase || mapsEnvironment,
+    google_cse_api_key: cseDatabase || cseEnvironment,
+    google_cse_id: cseIdDatabase || cseIdEnvironment,
+    google_maps_api_key_source: mapsDatabase ? "database" : mapsEnvironment ? "environment" : "none",
+    google_cse_api_key_source: cseDatabase ? "database" : cseEnvironment ? "environment" : "none",
+    google_cse_id_source: cseIdDatabase ? "database" : cseIdEnvironment ? "environment" : "none",
+  };
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders });
   if (req.method !== "POST") return response({ error: "Method not allowed." }, 405);
@@ -52,6 +74,37 @@ Deno.serve(async (req: Request) => {
         details: { allow_signups, maintenance_mode, max_domains_per_run, daily_free_credits, web_search_enabled },
       });
       return response({ settings });
+    }
+
+    if (body.action === "update_search_keys") {
+      const keys = body.keys && typeof body.keys === "object" ? body.keys as Record<string, unknown> : {};
+      const clear = body.clear && typeof body.clear === "object" ? body.clear as Record<string, unknown> : {};
+      let changed = 0;
+      for (const name of SEARCH_SECRET_NAMES) {
+        const value = typeof keys[name] === "string" ? (keys[name] as string).trim() : "";
+        if (clear[name] === true) {
+          const { error } = await supabase.from("search_service_secrets").delete().eq("name", name);
+          if (error) return response({ error: "Could not update search provider settings." }, 500);
+          changed += 1;
+        } else if (value) {
+          const { error } = await supabase.from("search_service_secrets").upsert({
+            name,
+            secret_value: value,
+            updated_by: actorId,
+            updated_at: new Date().toISOString(),
+          });
+          if (error) return response({ error: "Could not update search provider settings." }, 500);
+          changed += 1;
+        }
+      }
+      if (!changed) return response({ error: "Enter a key or choose a saved key to remove." }, 400);
+      const searchServices = await getSearchServiceStatus();
+      await supabase.from("admin_audit_log").insert({
+        actor_id: actorId,
+        action: "update_search_service_keys",
+        details: { configured: searchServices },
+      });
+      return response({ search_services: searchServices });
     }
 
     if (body.action === "grant_credits") {
@@ -137,7 +190,7 @@ Deno.serve(async (req: Request) => {
       "scraping_runs", "scrape_results", "domain_parsing_runs", "domain_parse_results",
       "email_contacts", "email_lists", "email_list_contacts", "email_delivery_log",
       "email_messages", "campaign_queue", "discovery_searches", "user_roles", "admin_audit_log",
-      "user_credit_accounts", "user_credit_transactions", "wallet_payments",
+      "user_credit_accounts", "user_credit_transactions", "wallet_payments", "credit_subscriptions",
     ] as const;
     const counts = await Promise.all(tables.map(async (table) => {
       const { count, error } = await supabase.from(table).select("*", { count: "exact", head: true });
@@ -152,14 +205,18 @@ Deno.serve(async (req: Request) => {
     ]);
     if (usersResult.error || runsResult.error || auditResult.error || settingsResult.error) throw new Error("Could not load admin overview.");
     const userIds = usersResult.data.users.map((user) => user.id);
-    const [rolesResult, creditAccountsResult] = userIds.length
+    const now = new Date().toISOString();
+    const [rolesResult, creditAccountsResult, subscriptionsResult] = userIds.length
       ? await Promise.all([
           supabase.from("user_roles").select("user_id,role").in("user_id", userIds),
           supabase.from("user_credit_accounts").select("user_id,daily_remaining,purchased_credits,daily_reset_date").in("user_id", userIds),
+          supabase.from("credit_subscriptions").select("user_id,credits_remaining,expires_at")
+            .in("user_id", userIds).lte("starts_at", now).gt("expires_at", now),
         ])
-      : [{ data: [], error: null }, { data: [], error: null }];
-    if (rolesResult.error || creditAccountsResult.error) throw new Error("Could not load user balances.");
+      : [{ data: [], error: null }, { data: [], error: null }, { data: [], error: null }];
+    if (rolesResult.error || creditAccountsResult.error || subscriptionsResult.error) throw new Error("Could not load user balances.");
 
+    const searchServices = await getSearchServiceStatus();
     return response({
       counts: Object.fromEntries(counts),
       users: usersResult.data.users.map((user) => ({
@@ -168,11 +225,21 @@ Deno.serve(async (req: Request) => {
         created_at: user.created_at,
         last_sign_in_at: user.last_sign_in_at,
         roles: (rolesResult.data ?? []).filter((role) => role.user_id === user.id).map((role) => role.role),
-        credit_balance: (creditAccountsResult.data ?? []).find((account) => account.user_id === user.id) ?? null,
+        credit_balance: (() => {
+          const account = (creditAccountsResult.data ?? []).find((item) => item.user_id === user.id);
+          if (!account) return null;
+          const subscriptions = (subscriptionsResult.data ?? []).filter((item) => item.user_id === user.id);
+          return {
+            ...account,
+            subscription_remaining: subscriptions.reduce((total, item) => total + Number(item.credits_remaining), 0),
+            subscription_expires_at: subscriptions[0]?.expires_at ?? null,
+          };
+        })(),
       })),
       recent_runs: runsResult.data,
       audit_log: auditResult.data,
       system_settings: settingsResult.data,
+      search_services: searchServices,
     });
   } catch (error) {
     console.error("Admin console request failed:", error);

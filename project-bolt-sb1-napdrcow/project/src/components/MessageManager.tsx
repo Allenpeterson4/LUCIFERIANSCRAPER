@@ -25,8 +25,17 @@ interface BounceEntry {
   first_failed_at: string;
   last_failed_at: string;
 }
-type Audience = "all" | "all_lists" | "today" | "range" | "list" | "batch";
-type MessageSection = "create" | "deliveries" | "saved";
+interface ProviderThrottle {
+  id: string;
+  host: string;
+  from_email: string;
+  hourly_limit: number | null;
+  messages_per_minute: number;
+  attempts_this_minute: number;
+  paused_until: string | null;
+}
+type Audience = "all" | "all_lists" | "today" | "list" | "batch" | "reminder";
+type MessageSection = "dashboard" | "saved" | "create";
 
 export function MessageManager({ initialBatch = null, onBatchConsumed }: {
   initialBatch?: ScrapeCampaignBatch | null;
@@ -36,9 +45,11 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
   const [messages, setMessages] = useState<EmailMessage[]>([]);
   const [lists, setLists] = useState<SavedList[]>([]);
   const [config, setConfig] = useState<SmtpSummary | null>(null);
-  const [smtpAccounts, setSmtpAccounts] = useState<Array<{ id: string; host: string; from_email: string; from_name: string | null; is_active: boolean }>>([]);
+  const [smtpAccounts, setSmtpAccounts] = useState<Array<{ id: string; host: string; from_email: string; from_name: string | null; hourly_limit: number | null; is_active: boolean }>>([]);
+  const [providerThrottles, setProviderThrottles] = useState<ProviderThrottle[]>([]);
+  const [showThrottleDetails, setShowThrottleDetails] = useState(false);
   const [queue, setQueue] = useState<CampaignQueueItem[]>([]);
-  const [section, setSection] = useState<MessageSection>("create");
+  const [section, setSection] = useState<MessageSection>("dashboard");
   const [deliveryAttempts, setDeliveryAttempts] = useState<DeliveryAttempt[]>([]);
   const [deliveryMetrics, setDeliveryMetrics] = useState({ sent: 0, failed: 0, throttled: 0, bounces: 0 });
   const [bounceEntries, setBounceEntries] = useState<BounceEntry[]>([]);
@@ -52,9 +63,12 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
   const [batchRecipients, setBatchRecipients] = useState<string[]>([]);
   const [batchRunId, setBatchRunId] = useState("");
   const [batchLabel, setBatchLabel] = useState("");
-  const [fromDate, setFromDate] = useState("");
-  const [toDate, setToDate] = useState("");
-  const [quantity, setQuantity] = useState(100);
+  const [isReminder, setIsReminder] = useState(false);
+  const [reminderRecipients, setReminderRecipients] = useState<string[]>([]);
+  const [reminderLabel, setReminderLabel] = useState("");
+  const [reminderSubject, setReminderSubject] = useState("");
+  const [reminderBody, setReminderBody] = useState("");
+  const [loadingReminderId, setLoadingReminderId] = useState("");
   const [previewCount, setPreviewCount] = useState<number | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -68,7 +82,7 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
     const [messageResult, listResult, configResult, queueResult, attemptsResult, sentCount, failedCount, throttledCount, bounceResult, bounceCount] = await Promise.all([
       supabase.from("email_messages").select("*").order("updated_at", { ascending: false }),
       supabase.from("email_lists").select("id,name").order("name"),
-      supabase.from("smtp_configs").select("id,host,from_email,from_name,is_active").order("created_at", { ascending: false }),
+      supabase.from("smtp_configs").select("id,host,from_email,from_name,hourly_limit,is_active").order("created_at", { ascending: false }),
       supabase.from("campaign_queue").select("*").order("created_at", { ascending: false }).limit(25),
       supabase.from("smtp_dispatch_attempts").select("id,message_id,recipient,outcome,provider_response,created_at").order("created_at", { ascending: false }).limit(100),
       supabase.from("smtp_dispatch_attempts").select("id", { count: "exact", head: true }).eq("outcome", "sent"),
@@ -77,7 +91,25 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
       supabase.from("smtp_bounce_entries").select("id,recipient,failure_reason,failure_count,status,first_failed_at,last_failed_at").order("last_failed_at", { ascending: false }).limit(100),
       supabase.from("smtp_bounce_entries").select("id", { count: "exact", head: true }),
     ]);
-    const smtpRows = (configResult.data as Array<{ id: string; host: string; from_email: string; from_name: string | null; is_active: boolean }> | null) ?? [];
+    const smtpRows = (configResult.data as Array<{ id: string; host: string; from_email: string; from_name: string | null; hourly_limit: number | null; is_active: boolean }> | null) ?? [];
+    const activeSmtpRows = smtpRows.filter((row) => row.is_active);
+    const rateResult = activeSmtpRows.length
+      ? await supabase.from("smtp_provider_rate_state")
+        .select("smtp_config_id,messages_per_minute,attempts_this_minute,paused_until")
+        .in("smtp_config_id", activeSmtpRows.map((row) => row.id))
+      : { data: [] };
+    setProviderThrottles(activeSmtpRows.map((account) => {
+      const state = rateResult.data?.find((row) => row.smtp_config_id === account.id);
+      return {
+        id: account.id,
+        host: account.host,
+        from_email: account.from_email,
+        hourly_limit: account.hourly_limit,
+        messages_per_minute: state?.messages_per_minute ?? 1,
+        attempts_this_minute: state?.attempts_this_minute ?? 0,
+        paused_until: state?.paused_until ?? null,
+      };
+    }));
     setMessages((messageResult.data as EmailMessage[]) ?? []);
     setLists((listResult.data as SavedList[]) ?? []);
     setSmtpAccounts(smtpRows);
@@ -100,7 +132,6 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
     setBatchLabel(initialBatch.batchLabel);
     setAudience("batch");
     setPreviewCount(initialBatch.emails.length);
-    setQuantity(initialBatch.emails.length);
     setMessageId(messages[0]?.id ?? "");
     setFeedback(null);
     setModalOpen(true);
@@ -162,7 +193,16 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
   const getRecipients = async () => {
     const pageSize = 1000;
     const rows: Array<{ email: string }> = [];
-    if (audience === "batch") {
+    if (audience === "reminder") {
+      for (let offset = 0; offset < reminderRecipients.length; offset += 200) {
+        const { data, error } = await supabase.from("email_contacts").select("email")
+          .in("email", reminderRecipients.slice(offset, offset + 200))
+          .is("replied_at", null)
+          .is("suppressed_at", null);
+        if (error) throw error;
+        rows.push(...(data ?? []));
+      }
+    } else if (audience === "batch") {
       for (let offset = 0; offset < batchRecipients.length; offset += 200) {
         const { data, error } = await supabase.from("email_contacts").select("email")
           .in("email", batchRecipients.slice(offset, offset + 200))
@@ -184,9 +224,7 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
         if (batch.length < pageSize) break;
       }
       for (let offset = 0; offset < contactIds.length; offset += 200) {
-        let query = supabase.from("email_contacts").select("id,email").in("id", contactIds.slice(offset, offset + 200)).is("last_sent_at", null).is("suppressed_at", null);
-        if (fromDate) query = query.gte("last_seen_at", new Date(`${fromDate}T00:00:00`).toISOString());
-        if (toDate) query = query.lte("last_seen_at", new Date(`${toDate}T23:59:59.999`).toISOString());
+        const query = supabase.from("email_contacts").select("id,email").in("id", contactIds.slice(offset, offset + 200)).is("last_sent_at", null).is("suppressed_at", null);
         const { data, error } = await query;
         if (error) throw error;
         rows.push(...(data ?? []));
@@ -199,8 +237,6 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
           start.setHours(0, 0, 0, 0);
           query = query.gte("last_seen_at", start.toISOString()).lte("last_seen_at", new Date().toISOString());
         }
-        if (audience === "range" && fromDate) query = query.gte("last_seen_at", new Date(`${fromDate}T00:00:00`).toISOString());
-        if (audience === "range" && toDate) query = query.lte("last_seen_at", new Date(`${toDate}T23:59:59.999`).toISOString());
         const { data, error } = await query.order("email").range(offset, offset + pageSize - 1);
         if (error) throw error;
         rows.push(...(data ?? []));
@@ -228,45 +264,95 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
     try {
       const recipients = await getRecipients();
       setPreviewCount(recipients.length);
-      setQuantity((current) => Math.min(current, recipients.length || 1));
     } catch (error) {
       setFeedback({ success: false, message: error instanceof Error ? error.message : "Could not load contacts." });
     }
     setBusy(false);
   };
 
-  const openDispatch = (id: string) => {
-    setMessageId(id);
-    setAudience("all");
+  const openDispatch = (id?: string) => {
+    setIsReminder(false);
+    setReminderRecipients([]);
+    setReminderLabel("");
+    setReminderSubject("");
+    setReminderBody("");
+    setMessageId(id ?? messages[0]?.id ?? "");
+    setAudience("list");
     setListId("");
-    setFromDate("");
-    setToDate("");
     setPreviewCount(null);
-    setQuantity(100);
     setFeedback(null);
     setModalOpen(true);
   };
 
+  const openReminder = async (item: CampaignQueueItem) => {
+    if (!session) return;
+    setLoadingReminderId(item.id);
+    setFeedback(null);
+    const sentRecipients = new Set<string>();
+    try {
+      for (let offset = 0; ; offset += 1000) {
+        const { data, error } = await supabase.from("smtp_dispatch_attempts").select("recipient")
+          .eq("campaign_queue_id", item.id).eq("outcome", "sent")
+          .order("id", { ascending: true }).range(offset, offset + 999);
+        if (error) throw error;
+        const batch = data ?? [];
+        batch.forEach((attempt) => sentRecipients.add(attempt.recipient.toLowerCase()));
+        if (batch.length < 1000) break;
+      }
+      if (sentRecipients.size === 0) throw new Error("This campaign has no successfully sent recipients to remind.");
+      const originalMessage = messages.find((message) => message.id === item.message_id);
+      setIsReminder(true);
+      setReminderRecipients([...sentRecipients]);
+      setReminderLabel(originalMessage?.subject ?? "previous campaign");
+      setReminderSubject(originalMessage ? `Reminder: ${originalMessage.subject}` : "A quick follow-up");
+      setReminderBody("");
+      setAudience("reminder");
+      setMessageId("");
+      setPreviewCount(null);
+      setModalOpen(true);
+    } catch (error) {
+      setFeedback({ success: false, message: error instanceof Error ? error.message : "Could not load reminder recipients." });
+    }
+    setLoadingReminderId("");
+  };
+
   const dispatch = async () => {
-    if (!session || !config || !messageId) {
+    if (!session || !config || (!isReminder && !messageId) || (isReminder && (!reminderSubject.trim() || !reminderBody.trim()))) {
       setFeedback({ success: false, message: "Configure and test SMTP settings before sending." });
       return;
     }
     setBusy(true);
     setFeedback(null);
+    let temporaryReminderMessageId: string | null = null;
     try {
-      const recipients = (await getRecipients()).slice(0, Math.max(0, quantity));
+      const recipients = await getRecipients();
       if (recipients.length === 0) throw new Error("No eligible contacts match this audience.");
       const activeConfigId = config?.id ?? smtpAccounts[0]?.id ?? null;
       if (!activeConfigId) throw new Error("Choose or save an SMTP account before dispatch.");
-      const result = await sendEmailsNow(session.access_token, messageId, recipients, activeConfigId, {
+      let dispatchMessageId = messageId;
+      if (isReminder) {
+        const { data: reminderMessage, error: saveError } = await supabase.from("email_messages").insert({
+          user_id: session.user.id,
+          subject: reminderSubject.trim(),
+          body: reminderBody.trim(),
+          format: "text",
+        }).select("id").single();
+        if (saveError || !reminderMessage) throw new Error(saveError?.message ?? "Could not save the reminder message.");
+        dispatchMessageId = reminderMessage.id;
+        temporaryReminderMessageId = reminderMessage.id;
+      }
+      const result = await sendEmailsNow(session.access_token, dispatchMessageId, recipients, activeConfigId, {
         sourceBatchId: audience === "batch" ? batchRunId : null,
-        batchLabel: audience === "batch" ? batchLabel : null,
+        batchLabel: isReminder ? `Reminder: ${reminderLabel}` : audience === "batch" ? batchLabel : null,
       });
       if (!result.success) throw new Error(result.message);
+      temporaryReminderMessageId = null;
       setFeedback({ success: true, message: result.message });
       await loadData();
     } catch (error) {
+      if (temporaryReminderMessageId) {
+        await supabase.from("email_messages").delete().eq("id", temporaryReminderMessageId);
+      }
       setFeedback({ success: false, message: error instanceof Error ? error.message : "Dispatch failed." });
     }
     setBusy(false);
@@ -285,18 +371,21 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
 
   return (
     <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-10 animate-fade-in">
-      <header className="mb-8">
-        <p className="text-xs uppercase tracking-wider text-neutral-500 mb-2">Communications</p>
-        <h1 className="text-3xl font-bold mb-2">Message manager</h1>
-        <p className="text-neutral-600">Create templates, review delivery performance, and manage saved content.</p>
+      <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p className="text-xs uppercase tracking-wider text-neutral-500 mb-2">Communications</p>
+          <h1 className="text-3xl font-bold mb-2">Message delivery</h1>
+          <p className="text-neutral-600">Monitor delivery performance, manage saved content, and create email templates.</p>
+        </div>
+        <button onClick={() => openDispatch()} className="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-5 py-3 text-sm font-semibold text-white shadow-sm hover:bg-primary-700"><Send size={17} />Send Message</button>
       </header>
 
       {feedback && !modalOpen && <p role={feedback.success ? "status" : "alert"} className={`mb-5 p-3 border rounded-lg text-sm ${feedback.success ? "border-green-300 bg-green-50 text-green-800" : "border-red-300 bg-red-50 text-red-700"}`}>{feedback.message}</p>}
       <nav aria-label="Message sections" className="flex flex-wrap gap-1 border-b border-neutral-200 mb-6">
         {([
-          ["create", "Create template", <Plus size={16} />],
-          ["deliveries", "Delivery log", <BarChart3 size={16} />],
-          ["saved", "Saved content", <Inbox size={16} />],
+          ["dashboard", "Delivery Dashboard", <BarChart3 size={16} />],
+          ["saved", "Saved Content", <Inbox size={16} />],
+          ["create", "Create Template", <Plus size={16} />],
         ] as const).map(([target, label, icon]) => <button
           key={target}
           onClick={() => setSection(target)}
@@ -313,7 +402,7 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
             </div>{editing && <button onClick={cancelEdit} title="Cancel editing" aria-label="Cancel editing"><X size={17} /></button>}</div>
             <div className="space-y-3">
               <label className="block text-sm font-medium">Subject<input value={subject} onChange={(event) => setSubject(event.target.value)} className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg text-sm" /></label>
-              <label className="block text-sm font-medium">Message body<textarea rows={7} value={body} onChange={(event) => setBody(event.target.value)} className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg text-sm resize-y" /></label>
+              <label className="block text-sm font-medium">{format === "html" ? "HTML code" : "Message body"}<textarea name={format === "html" ? "htmlCode" : "messageBody"} aria-label={format === "html" ? "HTML code" : "Message body"} spellCheck={format !== "html"} placeholder={format === "html" ? "<!doctype html>\n<html>\n  <body>\n    <p>Your message</p>\n  </body>\n</html>" : "Write your message"} rows={format === "html" ? 14 : 7} value={body} onChange={(event) => setBody(event.target.value)} className={`mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg text-sm resize-y ${format === "html" ? "font-mono" : ""}`} /></label>
               <button onClick={saveTemplate} disabled={busy} className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary-600 text-white rounded-lg text-sm font-medium disabled:opacity-50">{busy ? <Loader2 className="animate-spin" size={16} /> : editing ? <Check size={16} /> : <Plus size={16} />}{editing ? "Save changes" : "Save template"}</button>
             </div>
           </div>
@@ -331,12 +420,34 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
           </div>
           )}
 
-          {section === "deliveries" && <div className="space-y-5">
+          {section === "dashboard" && <div className="space-y-5">
             <section className="grid grid-cols-2 xl:grid-cols-4 gap-3">
-              {[["Sent", deliveryMetrics.sent, "text-green-700"], ["Failed", deliveryMetrics.failed, "text-red-700"], ["Provider throttles", deliveryMetrics.throttled, "text-amber-700"], ["Bounce entries", deliveryMetrics.bounces, "text-neutral-800"]].map(([label, count, color]) => <div key={label} className="border border-neutral-200 bg-white rounded-lg p-4">
+              {[ ["Sent", deliveryMetrics.sent, "text-green-700"], ["Failed", deliveryMetrics.failed, "text-red-700"], ["Bounce entries", deliveryMetrics.bounces, "text-neutral-800"]].map(([label, count, color]) => <div key={label} className="border border-neutral-200 bg-white rounded-lg p-4">
                 <p className="text-xs text-neutral-500">{label}</p><p className={`mt-2 text-2xl font-semibold ${color}`}>{Number(count).toLocaleString()}</p>
               </div>)}
+              <button type="button" aria-expanded={showThrottleDetails} onClick={() => setShowThrottleDetails((open) => !open)} className="border border-neutral-200 bg-white rounded-lg p-4 text-left hover:border-primary-300">
+                <p className="text-xs text-neutral-500">Provider throttles</p>
+                <p className="mt-2 text-2xl font-semibold text-amber-700">{deliveryMetrics.throttled.toLocaleString()}</p>
+                <span className="mt-1 block text-xs font-medium text-primary-700">{showThrottleDetails ? "Hide provider limits" : "View active provider limits"}</span>
+              </button>
             </section>
+            {showThrottleDetails && <section aria-label="Active SMTP provider throttle limits" className="border border-neutral-200 bg-white rounded-lg px-5">
+              <h3 className="py-4 text-sm font-semibold">Active SMTP provider limits</h3>
+              {providerThrottles.length === 0 ? <p className="border-t border-neutral-100 py-4 text-sm text-neutral-500">No active SMTP providers.</p> : <div className="divide-y divide-neutral-100">
+                {providerThrottles.map((provider) => {
+                  const paused = provider.paused_until && new Date(provider.paused_until) > new Date();
+                  return <article key={provider.id} className="flex flex-wrap items-center justify-between gap-3 border-t border-neutral-100 py-4">
+                    <div className="min-w-0"><p className="truncate text-sm font-medium text-neutral-800">{provider.from_email}</p><p className="mt-1 truncate text-xs text-neutral-500">{provider.host}</p></div>
+                    <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-neutral-600">
+                      <span><strong className="text-neutral-800">{provider.messages_per_minute}</strong> messages/min</span>
+                      <span><strong className="text-neutral-800">{provider.hourly_limit?.toLocaleString() ?? "Unspecified"}</strong> messages/hour</span>
+                      <span>{provider.attempts_this_minute} attempts this minute</span>
+                      <span className={paused ? "font-medium text-amber-700" : "font-medium text-green-700"}>{paused ? `Paused until ${new Date(provider.paused_until!).toLocaleTimeString()}` : "Ready"}</span>
+                    </div>
+                  </article>;
+                })}
+              </div>}
+            </section>}
             <section className="border border-neutral-200 bg-white rounded-lg overflow-hidden">
               <header className="flex items-center justify-between gap-3 p-5 border-b border-neutral-200"><h2 className="font-semibold">Recent delivery attempts</h2><button onClick={() => void loadData()} title="Refresh delivery log" aria-label="Refresh delivery log" className="p-2 border border-neutral-200 rounded-lg"><RefreshCw size={16} /></button></header>
               {loading ? <p className="p-6 text-sm text-neutral-500">Loading delivery log...</p> : deliveryAttempts.length === 0 ? <p className="p-6 text-sm text-neutral-500">No delivery attempts recorded yet.</p> : <div className="overflow-x-auto"><table className="w-full text-sm text-left">
@@ -371,6 +482,7 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
               <div className="flex justify-between gap-2"><span className="text-sm font-medium">{item.status}</span><span className="text-xs text-neutral-500">{item.total_sent}/{item.recipients.length}</span></div>
               <div className="h-1.5 bg-neutral-100 rounded-full mt-2 overflow-hidden"><div className="h-full bg-primary-600" style={{ width: `${item.recipients.length ? Math.min(100, (item.total_sent + item.total_failed) / item.recipients.length * 100) : 0}%` }} /></div>
               {item.error && <p className="mt-2 text-xs text-red-600">{item.error}</p>}
+              {item.status === "completed" && item.total_sent > 0 && <button onClick={() => void openReminder(item)} disabled={busy || loadingReminderId === item.id} className="mt-3 inline-flex items-center gap-1.5 rounded border border-neutral-200 px-2.5 py-1.5 text-xs font-medium text-neutral-700 hover:border-primary-300 hover:text-primary-700 disabled:opacity-50">{loadingReminderId === item.id ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}Send a reminder</button>}
             </div>)}
             {queue.length === 0 && <p className="text-sm text-neutral-500">No queued campaigns.</p>}
           </div>
@@ -381,23 +493,29 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
       {modalOpen && <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
         <button aria-label="Close send dialog" className="absolute inset-0 bg-black/70" onClick={() => setModalOpen(false)} />
         <section role="dialog" aria-modal="true" aria-labelledby="dispatch-title" className="relative w-full max-w-xl max-h-[90vh] overflow-y-auto bg-white border border-neutral-200 rounded-lg shadow-2xl">
-          <header className="flex items-center justify-between p-5 border-b border-neutral-200"><div><p className="text-xs uppercase tracking-wide text-neutral-500">Audience review</p><h2 id="dispatch-title" className="font-semibold mt-1">{selectedMessage?.subject ?? "Send message"}</h2></div><button onClick={() => setModalOpen(false)} aria-label="Close" className="p-2"><X size={18} /></button></header>
+          <header className="flex items-center justify-between p-5 border-b border-neutral-200"><div><p className="text-xs uppercase tracking-wide text-neutral-500">{isReminder ? "Campaign follow-up" : "Audience review"}</p><h2 id="dispatch-title" className="font-semibold mt-1">{isReminder ? "Send a reminder" : selectedMessage?.subject ?? "Send message"}</h2></div><button onClick={() => setModalOpen(false)} aria-label="Close" className="p-2"><X size={18} /></button></header>
           <div className="p-5 space-y-4">
             <label className="block text-sm font-medium">SMTP account<select value={config?.id ?? ""} onChange={(event) => setConfig({ id: event.target.value })} className="mt-1.5 w-full px-3 py-2.5 bg-white border border-neutral-200 rounded-lg"><option value="">Choose a saved SMTP account</option>{smtpAccounts.map((account) => <option key={account.id} value={account.id}>{account.from_email || account.host} {account.is_active ? "● active" : ""}</option>)}</select></label>
-            <label className="block text-sm font-medium">Message template<select value={messageId} onChange={(event) => setMessageId(event.target.value)} className="mt-1.5 w-full px-3 py-2.5 bg-white border border-neutral-200 rounded-lg"><option value="">Choose a template</option>{messages.map((message) => <option key={message.id} value={message.id}>{message.subject}</option>)}</select></label>
-            <label className="block text-sm font-medium">Recipient source<select value={audience} onChange={(event) => { setAudience(event.target.value as Audience); setPreviewCount(null); }} className="mt-1.5 w-full px-3 py-2.5 bg-white border border-neutral-200 rounded-lg">
-              <option value="all">All unsent contacts</option><option value="all_lists">All email lists</option><option value="today">Scraped today</option><option value="range">Date range</option><option value="list">Specific email list</option>
-              {batchRecipients.length > 0 && <option value="batch">Selected batch: {batchLabel}</option>}
-            </select></label>
+            {isReminder ? <>
+              <label className="block text-sm font-medium">Reminder subject<input value={reminderSubject} onChange={(event) => setReminderSubject(event.target.value)} maxLength={200} className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg" /></label>
+              <label className="block text-sm font-medium">Reminder message<textarea value={reminderBody} onChange={(event) => setReminderBody(event.target.value)} rows={7} maxLength={20000} placeholder="Write a concise follow-up message" className="mt-1.5 w-full resize-y rounded-lg border border-neutral-200 px-3 py-2.5 text-sm" /></label>
+              <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-sm"><p className="font-medium">Original campaign: {reminderLabel}</p><p className="mt-1 text-xs text-neutral-500">Only successfully sent recipients with no recorded reply are eligible.</p></div>
+            </> : <>
+              <label className="block text-sm font-medium">Message template<select value={messageId} onChange={(event) => setMessageId(event.target.value)} className="mt-1.5 w-full px-3 py-2.5 bg-white border border-neutral-200 rounded-lg"><option value="">Choose a template</option>{messages.map((message) => <option key={message.id} value={message.id}>{message.subject}</option>)}</select></label>
+              <label className="block text-sm font-medium">Recipient source<select value={audience} onChange={(event) => { setAudience(event.target.value as Audience); setPreviewCount(null); }} className="mt-1.5 w-full px-3 py-2.5 bg-white border border-neutral-200 rounded-lg">
+                <option value="all">All unsent contacts</option><option value="all_lists">All email lists</option><option value="today">Scraped today</option><option value="list">Specific email list</option>
+                {batchRecipients.length > 0 && <option value="batch">Selected batch: {batchLabel}</option>}
+              </select></label>
+            </>}
+            {!isReminder && <>
             {audience === "batch" && <p className="p-3 bg-neutral-50 border border-neutral-200 rounded-lg text-sm">Batch: {batchLabel} · {batchRecipients.length.toLocaleString()} extracted contacts</p>}
             {(audience === "list" || audience === "all_lists") && <label className="block text-sm font-medium">Email list<select value={listId} onChange={(event) => { setListId(event.target.value); setPreviewCount(null); }} disabled={audience === "all_lists"} className="mt-1.5 w-full px-3 py-2.5 bg-white border border-neutral-200 rounded-lg disabled:opacity-50"><option value="">{audience === "all_lists" ? "All saved lists" : "Choose a list"}</option>{lists.map((list) => <option key={list.id} value={list.id}>{list.name}</option>)}</select></label>}
-            {(audience === "range" || audience === "list" || audience === "all_lists") && <div className="grid sm:grid-cols-2 gap-3"><label className="text-sm font-medium">From date<input type="date" value={fromDate} onChange={(event) => { setFromDate(event.target.value); setPreviewCount(null); }} className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg" /></label><label className="text-sm font-medium">To date<input type="date" value={toDate} onChange={(event) => { setToDate(event.target.value); setPreviewCount(null); }} className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg" /></label></div>}
-            <button onClick={previewRecipients} disabled={busy || (audience === "list" && !listId)} className="px-3 py-2 border border-neutral-200 rounded-lg text-sm disabled:opacity-50">{busy ? "Loading audience..." : "Review eligible contacts"}</button>
-            {previewCount !== null && <div className="p-3 bg-neutral-50 border border-neutral-200 rounded-lg"><p className="text-sm font-medium">{previewCount.toLocaleString()} eligible contacts</p><p className="text-xs text-neutral-500 mt-1">Previously sent and suppressed contacts are excluded.</p></div>}
-            <label className="block text-sm font-medium">Maximum recipients<input type="number" min={1} max={previewCount ?? 20000} value={quantity} onChange={(event) => setQuantity(Math.min(previewCount ?? 20000, Math.max(1, Number(event.target.value))))} className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg" /></label>
+            </>}
+            <button onClick={previewRecipients} disabled={busy || (audience === "list" && !listId) || (isReminder && reminderRecipients.length === 0)} className="px-3 py-2 border border-neutral-200 rounded-lg text-sm disabled:opacity-50">{busy ? "Loading audience..." : isReminder ? "Review recipients without replies" : "Review eligible contacts"}</button>
+            {previewCount !== null && <div className="p-3 bg-neutral-50 border border-neutral-200 rounded-lg"><p className="text-sm font-medium">{previewCount.toLocaleString()} eligible contacts</p><p className="text-xs text-neutral-500 mt-1">{isReminder ? "Recipients with a recorded reply are excluded." : "Previously sent and suppressed contacts are excluded."}</p></div>}
             {feedback && <div role={feedback.success ? "status" : "alert"} className={`flex gap-2 p-3 rounded-lg text-sm ${feedback.success ? "bg-green-50 text-green-800" : "bg-red-50 text-red-700"}`}><AlertCircle size={16} className="shrink-0 mt-0.5" />{feedback.message}</div>}
-            <p className="text-xs text-neutral-500">Scheduling uses 1 credit, then each SMTP send attempt uses 1 credit. Queued campaigns pause automatically until the daily reset if credits run out.</p>
-            <footer className="flex flex-wrap gap-2 pt-2"><button onClick={() => void dispatch()} disabled={busy || !config || previewCount === null} className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"><Clock size={15} />Queue for adaptive dispatch</button></footer>
+            <p className="text-xs text-neutral-500">All eligible recipients are scheduled automatically. Delivery follows the selected SMTP provider’s adaptive sending limits, and pauses when credits are unavailable.</p>
+            <footer className="flex flex-wrap gap-2 pt-2"><button onClick={() => void dispatch()} disabled={busy || !config || previewCount === null || (isReminder && (!reminderSubject.trim() || !reminderBody.trim()))} className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary-600 text-white rounded-lg text-sm font-medium disabled:opacity-50"><Clock size={15} />{isReminder ? "Queue reminder" : "Schedule automatic hourly delivery"}</button></footer>
           </div>
         </section>
       </div>}

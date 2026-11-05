@@ -17,10 +17,9 @@ import { useAuth } from "@/lib/auth";
 import { scrapeDomains, type ScrapeResponseData } from "@/lib/scrape";
 import { HistoryView } from "@/components/HistoryView";
 import { KeywordSearchPanel } from "@/components/KeywordSearchPanel";
-import type { ScrapeCampaignBatch } from "@/lib/types";
+import type { CompanyRecord, ScrapeCampaignBatch } from "@/lib/types";
 
-interface DomainResult {
-  domain: string;
+interface DomainResult extends CompanyRecord {
   emails: string[];
   status: string;
   pages_scanned: number;
@@ -35,33 +34,26 @@ interface ScrapeToolProps {
 
 export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }: ScrapeToolProps) {
   const { session } = useAuth();
-  const [mode, setMode] = useState<"single" | "bulk">("single");
+  const [activeTab, setActiveTab] = useState<"single" | "bulk" | "history">("single");
   const [singleDomain, setSingleDomain] = useState("");
   const [bulkInput, setBulkInput] = useState("");
+  const [businessFocus, setBusinessFocus] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<DomainResult[] | null>(null);
   const [totalEmails, setTotalEmails] = useState(0);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState<string | null>(null);
-  const [websiteHistoryOpen, setWebsiteHistoryOpen] = useState(false);
-
   useEffect(() => {
     if (pendingDomains && pendingDomains.length > 0) {
-      setMode("bulk");
+      setActiveTab("bulk");
       setBulkInput(pendingDomains.join("\n"));
       onPendingConsumed?.();
     }
   }, [pendingDomains, onPendingConsumed]);
 
-  useEffect(() => {
-    if (websiteHistoryOpen) {
-      document.getElementById("website-scrape-history")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-  }, [websiteHistoryOpen]);
-
   const parseDomains = (): string[] => {
-    if (mode === "single") {
+    if (activeTab === "single") {
       return [singleDomain];
     }
     return bulkInput
@@ -84,7 +76,8 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
     try {
       const data: ScrapeResponseData = await scrapeDomains(
         domains,
-        session!.access_token
+        session!.access_token,
+        { intent: businessFocus.trim() || undefined }
       );
       setResults(data.results);
       setTotalEmails(data.total_emails);
@@ -141,52 +134,40 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
       </div>
 
       {/* Mode toggle */}
-      <div className="mb-6 flex flex-wrap items-center gap-2">
-        <div className="inline-flex p-1 bg-neutral-100 rounded-lg">
-        <button
-          onClick={() => setMode("single")}
-          className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all ${
-            mode === "single"
-              ? "bg-white text-primary-700 shadow-sm"
-              : "text-neutral-500 hover:text-neutral-700"
-          }`}
-        >
-          <Search size={16} />
-          Single domain
-        </button>
-        <button
-          onClick={() => setMode("bulk")}
-          className={`flex items-center gap-2 px-4 py-2 rounded-md text-sm font-medium transition-all ${
-            mode === "bulk"
-              ? "bg-white text-primary-700 shadow-sm"
-              : "text-neutral-500 hover:text-neutral-700"
-          }`}
-        >
-          <Layers size={16} />
-          Bulk domains
-        </button>
-        </div>
-        <button onClick={() => setWebsiteHistoryOpen((open) => !open)} className="inline-flex items-center gap-2 px-3 py-2 border border-neutral-200 bg-white rounded-lg text-sm font-medium">
-          <Inbox size={16} />{websiteHistoryOpen ? "Hide website history" : "Website scrape history"}
-        </button>
-      </div>
+      <nav role="tablist" aria-label="Email scraper sections" className="mb-6 flex flex-wrap gap-1 border-b border-neutral-200">
+        {([
+          ["single", "Single domain", <Search size={16} />],
+          ["bulk", "Bulk domains", <Layers size={16} />],
+          ["history", "Email scraper history", <Inbox size={16} />],
+        ] as const).map(([tab, label, icon]) => <button
+          key={tab}
+          role="tab"
+          aria-selected={activeTab === tab}
+          onClick={() => setActiveTab(tab)}
+          className={`inline-flex items-center gap-2 px-4 py-3 border-b-2 text-sm font-medium ${activeTab === tab ? "border-primary-600 text-primary-700" : "border-transparent text-neutral-500 hover:text-neutral-800"}`}
+        >{icon}{label}</button>)}
+      </nav>
 
-      <KeywordSearchPanel
+      {activeTab !== "history" && <KeywordSearchPanel
         destination="email-domain"
         onUseResult={(result) => {
           try {
             setSingleDomain(new URL(result.link).hostname.replace(/^www\./, ""));
-            setMode("single");
+            setActiveTab("single");
             setError(null);
           } catch {
             setError("This search result does not have a valid website address.");
           }
         }}
-      />
+      />}
 
       {/* Input */}
-      <div className="bg-white rounded-2xl border border-neutral-200 p-6 mb-6">
-        {mode === "single" ? (
+      {activeTab !== "history" && <div className="bg-white rounded-2xl border border-neutral-200 p-6 mb-6">
+        <label className="mb-5 block text-sm font-medium text-neutral-700">
+          Business focus <span className="font-normal text-neutral-400">(optional)</span>
+          <input value={businessFocus} onChange={(event) => setBusinessFocus(event.target.value)} maxLength={200} placeholder="e.g. construction companies or educational institutes" className="mt-1.5 w-full px-4 py-2.5 rounded-lg border border-neutral-200 focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none text-sm" />
+        </label>
+        {activeTab === "single" ? (
           <div>
             <label className="block text-sm font-medium text-neutral-700 mb-2">
               Domain to analyze
@@ -251,7 +232,7 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
             </div>
           </div>
         )}
-      </div>
+      </div>}
 
       {error && (
         <div className="flex items-start gap-3 bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-6 animate-slide-in">
@@ -264,7 +245,7 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
       )}
 
       {/* Loading state */}
-      {loading && (
+      {loading && activeTab !== "history" && (
         <div className="bg-white rounded-2xl border border-neutral-200 p-10 text-center animate-fade-in">
           <Loader2 size={36} className="animate-spin text-primary-600 mx-auto mb-4" />
           <p className="font-medium text-neutral-700">Crawling domains and extracting emails...</p>
@@ -273,7 +254,7 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
       )}
 
       {/* Results */}
-      {results && !loading && (
+      {results && !loading && activeTab !== "history" && (
         <div className="space-y-4 animate-fade-in">
           <div className="flex items-center justify-between bg-white rounded-2xl border border-neutral-200 px-6 py-4">
             <div className="flex items-center gap-6">
@@ -288,7 +269,7 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
               </div>
             </div>
             <button
-              onClick={() => setWebsiteHistoryOpen(true)}
+              onClick={() => setActiveTab("history")}
               className="text-sm font-medium text-primary-600 hover:text-primary-700 flex items-center gap-1.5"
             >
               View history
@@ -316,8 +297,9 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
                     <ChevronRight size={18} className="text-neutral-400 shrink-0" />
                   )}
                   <Globe size={18} className="text-primary-600 shrink-0" />
-                  <span className="font-mono font-medium text-neutral-800 flex-1 truncate">
-                    {r.domain}
+                  <span className="min-w-0 flex-1 truncate">
+                    <span className="block truncate font-medium text-neutral-800">{r.business_name}</span>
+                    <span className="block truncate font-mono text-xs text-neutral-500">{r.domain}</span>
                   </span>
                   <span
                     className={`text-xs font-medium px-2.5 py-1 rounded-full ${
@@ -338,7 +320,13 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
 
                 {expanded.has(r.domain) && (
                   <div className="px-5 pb-5 pt-1 border-t border-neutral-100 animate-slide-in">
-                    {r.status === "failed" && r.error ? (
+                    <div className="py-3">
+                      <p className="text-xs font-medium text-primary-700">{r.category}</p>
+                      <p className="mt-1 text-sm text-neutral-600">{r.service_summary}</p>
+                    </div>
+                    {r.status === "not_relevant" && r.error ? (
+                      <p className="py-3 text-sm text-amber-700">{r.error}</p>
+                    ) : r.status === "failed" && r.error ? (
                       <div className="flex items-center gap-2 text-sm text-red-600 py-3">
                         <AlertCircle size={16} />
                         {r.error}
@@ -401,7 +389,7 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
           )}
         </div>
       )}
-      {websiteHistoryOpen && <div id="website-scrape-history" className="mt-10 border-t border-neutral-200 pt-2"><HistoryView sourceType="website" onSendCampaign={onSendCampaign} /></div>}
+      <div className="border-t border-neutral-200 pt-6"><HistoryView sourceType="website" title="Email scraper history" onSendCampaign={onSendCampaign} /></div>
     </div>
   );
 }

@@ -43,9 +43,13 @@ export function KeywordSearchPanel({ destination, onUseResult }: {
       if (active) setEnabled(data?.web_search_enabled === true);
     };
     void loadSetting();
+    const refreshInterval = window.setInterval(() => void loadSetting(), 15000);
+    window.addEventListener("focus", loadSetting);
     window.addEventListener("system-settings-updated", loadSetting);
     return () => {
       active = false;
+      window.clearInterval(refreshInterval);
+      window.removeEventListener("focus", loadSetting);
       window.removeEventListener("system-settings-updated", loadSetting);
     };
   }, []);

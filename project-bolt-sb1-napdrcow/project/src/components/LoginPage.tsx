@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Mail, Eye, EyeOff, Loader2, ArrowLeft } from "lucide-react";
+import { Mail, Eye, EyeOff, Loader2, ArrowLeft, KeyRound } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { supabase } from "@/lib/supabase";
 import type { View } from "@/components/Header";
 
 export function LoginPage({ onNavigate, adminLogin = false }: { onNavigate: (v: View) => void; adminLogin?: boolean }) {
@@ -8,18 +9,34 @@ export function LoginPage({ onNavigate, adminLogin = false }: { onNavigate: (v: 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [forgotPassword, setForgotPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setNotice("");
     setLoading(true);
     const { error: err } = await signIn(email, password);
     setLoading(false);
     if (err) {
       setError(err);
     }
+  };
+
+  const handlePasswordReset = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    setNotice("");
+    setLoading(true);
+    const { error: resetError } = await supabase.auth.resetPasswordForEmail(email.trim(), {
+      redirectTo: `${window.location.origin}/reset-password`,
+    });
+    setLoading(false);
+    if (resetError) setError(resetError.message);
+    else setNotice("If an account exists for this email, a password reset link has been sent.");
   };
 
   return (
@@ -43,11 +60,11 @@ export function LoginPage({ onNavigate, adminLogin = false }: { onNavigate: (v: 
               </div>
               <span className="font-bold text-lg">MailHarvest</span>
             </div>
-            <h1 className="text-2xl font-bold mb-1">{adminLogin ? "Administrator sign in" : "Welcome back"}</h1>
+            <h1 className="text-2xl font-bold mb-1">{forgotPassword ? "Reset your password" : adminLogin ? "Administrator sign in" : "Welcome back"}</h1>
             <p className="text-neutral-500 text-sm mb-6">
-              {adminLogin ? "Sign in with an administrator account to continue." : "Sign in to access your scraping dashboard and history."}
+              {forgotPassword ? "Enter your account email and we will send a secure reset link." : adminLogin ? "Sign in with an administrator account to continue." : "Sign in to access your scraping dashboard and history."}
             </p>
-            <form onSubmit={handleSubmit} className="space-y-4">
+            <form onSubmit={forgotPassword ? handlePasswordReset : handleSubmit} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-neutral-700 mb-1.5">Email</label>
                 <input
@@ -59,7 +76,7 @@ export function LoginPage({ onNavigate, adminLogin = false }: { onNavigate: (v: 
                   placeholder="you@example.com"
                 />
               </div>
-              <div>
+              {!forgotPassword && <div>
                 <label className="block text-sm font-medium text-neutral-700 mb-1.5">Password</label>
                 <div className="relative">
                   <input
@@ -79,22 +96,27 @@ export function LoginPage({ onNavigate, adminLogin = false }: { onNavigate: (v: 
                     {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
                   </button>
                 </div>
-              </div>
+              </div>}
               {error && (
                 <div className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2 animate-slide-in">
                   {error}
                 </div>
               )}
+              {notice && <p role="status" className="rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-800">{notice}</p>}
               <button
                 type="submit"
                 disabled={loading}
                 className="w-full bg-primary-600 hover:bg-primary-700 disabled:opacity-60 text-white font-medium py-2.5 rounded-lg transition-colors flex items-center justify-center gap-2"
               >
                 {loading && <Loader2 size={18} className="animate-spin" />}
-                Sign in
+                {forgotPassword ? "Send reset link" : "Sign in"}
               </button>
             </form>
-            {!adminLogin && (
+            {!adminLogin && <div className="mt-4 text-center">
+              {forgotPassword ? <button type="button" onClick={() => { setForgotPassword(false); setError(null); setNotice(""); }} className="text-sm font-medium text-primary-600 hover:underline">Back to sign in</button>
+                : <button type="button" onClick={() => { setForgotPassword(true); setError(null); setNotice(""); }} className="inline-flex items-center gap-1.5 text-sm font-medium text-primary-600 hover:underline"><KeyRound size={14} />Forgot password?</button>}
+            </div>}
+            {!adminLogin && !forgotPassword && (
               <p className="text-center text-sm text-neutral-500 mt-5">
                 Don't have an account?{" "}
                 <button

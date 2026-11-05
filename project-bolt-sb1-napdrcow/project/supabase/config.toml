@@ -9,3 +9,6 @@ verify_jwt = true
 
 [functions.credit-wallet]
 verify_jwt = false
+
+[functions.email-reply-webhook]
+verify_jwt = false

@@ -1,3 +1,4 @@
+import { useState } from "react";
 import {
   Mail,
   Search,
@@ -10,8 +11,10 @@ import {
   Sparkles,
   BarChart3,
   RefreshCw,
+  Download,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { usePwaInstall } from "@/lib/use-pwa-install";
 import type { View } from "@/components/Header";
 
 interface LandingProps {
@@ -20,6 +23,12 @@ interface LandingProps {
 
 export function Landing({ onNavigate }: LandingProps) {
   const { user } = useAuth();
+  const { isInstalled, installApp } = usePwaInstall();
+  const [installHint, setInstallHint] = useState(false);
+
+  const handleInstall = async () => {
+    setInstallHint(await installApp() === "unavailable");
+  };
 
   const startScraping = () => {
     if (user) {
@@ -66,7 +75,9 @@ export function Landing({ onNavigate }: LandingProps) {
               >
                 Learn how it works
               </button>
+              {!isInstalled && <button onClick={() => void handleInstall()} className="inline-flex items-center gap-2 rounded-xl border border-primary-200 bg-primary-50 px-6 py-3.5 font-medium text-primary-700 transition-colors hover:bg-primary-100"><Download size={18} />Install App</button>}
             </div>
+            {installHint && <p role="status" className="mt-3 text-xs text-neutral-500">Use your browser’s Install app or Add to Home Screen menu.</p>}
           </div>
 
           {/* Preview card */}

@@ -6,6 +6,7 @@ import type { View } from "@/components/Header";
 
 export function SignupPage({ onNavigate }: { onNavigate: (v: View) => void }) {
   const { signUp } = useAuth();
+  const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -25,7 +26,7 @@ export function SignupPage({ onNavigate }: { onNavigate: (v: View) => void }) {
     e.preventDefault();
     setError(null);
     setLoading(true);
-    const { error: err } = await signUp(email, password);
+    const { error: err } = await signUp(username, email, password);
     setLoading(false);
     if (err) {
       setError(err);
@@ -60,6 +61,22 @@ export function SignupPage({ onNavigate }: { onNavigate: (v: View) => void }) {
             </p>
             {!allowSignups && <p role="status" className="mb-4 rounded-lg bg-neutral-100 px-3 py-2 text-sm text-neutral-600">New account registration is currently disabled.</p>}
             <form onSubmit={handleSubmit} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-neutral-700 mb-1.5">Username</label>
+                <input
+                  type="text"
+                  required
+                  minLength={3}
+                  maxLength={32}
+                  pattern="[A-Za-z0-9._-]+"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  className="w-full px-4 py-2.5 rounded-lg border border-neutral-200 focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none transition-all"
+                  placeholder="your.username"
+                  autoComplete="username"
+                />
+                <p className="mt-1 text-xs text-neutral-500">3-32 letters, numbers, periods, underscores, or hyphens.</p>
+              </div>
               <div>
                 <label className="block text-sm font-medium text-neutral-700 mb-1.5">Email</label>
                 <input

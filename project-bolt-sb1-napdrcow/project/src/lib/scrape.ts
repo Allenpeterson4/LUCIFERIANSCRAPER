@@ -1,11 +1,11 @@
 import { supabase } from "@/lib/supabase";
+import type { CompanyRecord } from "@/lib/types";
 
 export interface ScrapeResponseData {
   run_id: string;
   total_emails: number;
   domains_scraped: number;
-  results: Array<{
-    domain: string;
+  results: Array<CompanyRecord & {
     emails: string[];
     status: string;
     pages_scanned: number;
@@ -17,6 +17,7 @@ export interface ScrapeOptions {
   sourceType?: "website" | "maps";
   sourceQuery?: string;
   batchLabel?: string;
+  intent?: string;
 }
 
 export async function scrapeDomains(
@@ -39,6 +40,7 @@ export async function scrapeDomains(
         source_type: options.sourceType,
         source_query: options.sourceQuery,
         batch_label: options.batchLabel,
+        intent: options.intent,
       }),
     });
   } catch {

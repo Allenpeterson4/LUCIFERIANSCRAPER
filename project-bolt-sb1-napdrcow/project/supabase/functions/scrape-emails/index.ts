@@ -1,4 +1,5 @@
 import { createClient } from "npm:@supabase/supabase-js@2.57.4";
+import { filterRelevantCompanies } from "../_shared/company-intent.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -16,6 +17,60 @@ const JUNK_EMAILS = new Set([
 ]);
 
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".gif", ".svg", ".webp", ".ico", ".bmp"];
+const IRRELEVANT_URL_SEGMENTS = new Set([
+  "affiliate", "affiliates", "career", "careers", "cookie", "cookies", "job", "jobs",
+  "legal", "partner", "partners", "partnership", "partnerships", "policy", "policies",
+  "privacy", "terms",
+]);
+
+const BUSINESS_CATEGORIES: Record<string, string[]> = {
+  Construction: ["construction", "builder", "contractor", "building", "infrastructure", "architect"],
+  Education: ["education", "school", "university", "college", "academy", "institute", "training", "learning"],
+  Healthcare: ["healthcare", "medical", "clinic", "hospital", "pharma", "biotech"],
+  Manufacturing: ["manufacturing", "manufacturer", "factory", "industrial", "production", "machinery"],
+  Technology: ["technology", "software", "digital", "cloud", "saas", "information technology"],
+  Agriculture: ["agriculture", "agricultural", "farming", "farm", "crop", "livestock"],
+};
+
+function categoryFromText(text: string): string {
+  const normalized = text.toLowerCase();
+  return Object.entries(BUSINESS_CATEGORIES).find(([, terms]) => terms.some((term) => normalized.includes(term)))?.[0] ?? "Other";
+}
+
+function extractPageText(html: string): string {
+  return html.replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<[^>]*>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&")
+    .replace(/\s+/g, " ").trim();
+}
+
+function companyMetadata(html: string, domain: string) {
+  const metaTags = html.match(/<meta\b[^>]*>/gi) ?? [];
+  const readMeta = (names: string[]) => {
+    for (const tag of metaTags) {
+      const key = tag.match(/(?:name|property)=["']([^"']+)["']/i)?.[1]?.toLowerCase();
+      if (!key || !names.includes(key)) continue;
+      const content = tag.match(/content=["']([^"']*)["']/i)?.[1];
+      if (content) return content.replace(/&amp;/gi, "&").replace(/&nbsp;|&#160;/gi, " ").trim();
+    }
+    return "";
+  };
+  const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]
+    ?.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim() ?? "";
+  const businessName = readMeta(["og:site_name", "application-name"]) || title.split(/\s[|–—-]\s/)[0] || domain;
+  const serviceSummary = readMeta(["description", "og:description", "twitter:description"])
+    .slice(0, 240) || "Core services not listed in source.";
+  return { business_name: businessName.slice(0, 120), service_summary: serviceSummary, category: categoryFromText(`${businessName} ${serviceSummary}`) };
+}
+
+function isIrrelevantPath(value: string): boolean {
+  try {
+    const url = new URL(value);
+    const segments = `${url.pathname} ${url.search}`.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    return segments.some((segment) => IRRELEVANT_URL_SEGMENTS.has(segment));
+  } catch {
+    return true;
+  }
+}
 
 function isJunkEmail(email: string): boolean {
   const e = email.toLowerCase();
@@ -33,7 +88,7 @@ function normalizeDomain(input: string): string {
   return d;
 }
 
-async function fetchWithTimeout(url: string, timeoutMs = 6000): Promise<string | null> {
+async function fetchWithTimeout(url: string, timeoutMs = 6000, allowedDomain?: string): Promise<string | null> {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -51,6 +106,10 @@ async function fetchWithTimeout(url: string, timeoutMs = 6000): Promise<string |
       redirect: "follow",
     });
     if (res.status >= 200 && res.status < 400) {
+      if (allowedDomain) {
+        const finalHost = new URL(res.url).hostname.toLowerCase();
+        if (finalHost !== allowedDomain && !finalHost.endsWith(`.${allowedDomain}`)) return null;
+      }
       return await res.text();
     }
     return null;
@@ -161,7 +220,7 @@ function extractLinks(html: string, baseDomain: string): string[] {
     }
     try {
       const u = new URL(abs);
-      if (u.hostname.endsWith(baseDomain) || u.hostname === baseDomain) {
+      if ((u.hostname === baseDomain || u.hostname.endsWith(`.${baseDomain}`)) && !isIrrelevantPath(abs)) {
         links.add(abs);
       }
     } catch {
@@ -172,31 +231,37 @@ function extractLinks(html: string, baseDomain: string): string[] {
 }
 
 const CONTACT_KEYWORDS = [
-  "contact", "kontakt", "about", "team", "imprint",
-  "privacy", "legal", "support", "help", "staff", "people",
-  "sales", "info", "reach", "connect", "directory",
+  "contact", "kontakt", "about", "team", "support", "help", "staff", "people",
+  "sales", "info", "reach", "connect", "services", "products", "solutions", "capabilities", "directory",
 ];
 
-function prioritizeLinks(links: string[]): string[] {
+function prioritizeLinks(links: string[], intent = ""): string[] {
   const priority: string[] = [];
   const rest: string[] = [];
   const seen = new Set<string>();
+  const intentTerms = intent.toLowerCase().split(/[^a-z0-9]+/).filter((term) => term.length > 2 && !["and", "for", "the", "with"].includes(term));
+  const businessPageMarkers = ["about", "contact", "team", "service", "product", "solution", "capability", "expertise", "industry", "project", "portfolio", "work", "company"];
   for (const l of links) {
     if (seen.has(l)) continue;
     seen.add(l);
+    if (isIrrelevantPath(l)) continue;
     const lower = l.toLowerCase();
-    if (CONTACT_KEYWORDS.some((k) => lower.includes(k))) {
+    const matchesIntent = intentTerms.some((term) => lower.includes(term));
+    const isBusinessPage = businessPageMarkers.some((marker) => lower.includes(marker));
+    if (matchesIntent || isBusinessPage || CONTACT_KEYWORDS.some((k) => lower.includes(k))) {
       priority.push(l);
-    } else {
+    } else if (intentTerms.length === 0) {
       rest.push(l);
     }
   }
-  // Take up to 8 contact-priority pages, plus 4 other pages = max 12 sub-pages
-  return [...priority.slice(0, 8), ...rest.slice(0, 4)];
+  return intentTerms.length > 0 ? priority.slice(0, 12) : [...priority.slice(0, 8), ...rest.slice(0, 4)];
 }
 
-async function scrapeDomain(domain: string): Promise<{
+async function scrapeDomain(domain: string, intent: string, source: "website" | "maps"): Promise<{
+  business_name: string;
   emails: string[];
+  service_summary: string;
+  category: string;
   pagesScanned: number;
   status: string;
   error: string | null;
@@ -213,39 +278,79 @@ async function scrapeDomain(domain: string): Promise<{
 
   let homeHtml: string | null = null;
   for (const c of candidates) {
-    homeHtml = await fetchWithTimeout(c, 6000);
+    homeHtml = await fetchWithTimeout(c, 6000, domain);
     if (homeHtml) break;
   }
 
   if (!homeHtml) {
     return {
+      business_name: domain,
       emails: [],
+      service_summary: "Core services not listed in source.",
+      category: "Other",
       pagesScanned: 0,
       status: "failed",
       error: "Could not reach the domain. The site may be down, blocking automated requests, or requiring JavaScript to render.",
     };
   }
+  const metadata = companyMetadata(homeHtml, domain);
+  const [reviewedCompany] = await filterRelevantCompanies(intent, [{
+    ...metadata,
+    domain,
+    source,
+    source_context: extractPageText(homeHtml).slice(0, 2000),
+  }]);
+  if (!reviewedCompany) {
+    return {
+      ...metadata,
+      emails: [],
+      pagesScanned: 1,
+      status: "not_relevant",
+      error: "The source content did not match the requested business focus.",
+    };
+  }
+  const verifiedMetadata = {
+    business_name: reviewedCompany.business_name,
+    service_summary: reviewedCompany.service_summary,
+    category: reviewedCompany.category,
+  };
   pagesScanned += 1;
   extractEmailsFromHtml(homeHtml).forEach((e) => allEmails.add(e));
 
   // Crawl sub-pages
-  const links = prioritizeLinks(extractLinks(homeHtml, domain));
+  const links = prioritizeLinks(extractLinks(homeHtml, domain), intent);
   for (const link of links) {
     if (allEmails.size >= 100) break;
-    const html = await fetchWithTimeout(link, 6000);
+    const html = await fetchWithTimeout(link, 6000, domain);
     pagesScanned += 1;
     if (html) {
+      const [relevantPage] = await filterRelevantCompanies(intent, [{
+        ...verifiedMetadata,
+        domain,
+        source,
+        service_summary: verifiedMetadata.service_summary,
+        source_context: extractPageText(html).slice(0, 1200),
+      }]);
+      if (!relevantPage) continue;
       extractEmailsFromHtml(html).forEach((e) => allEmails.add(e));
       // Also extract links from sub-pages and crawl one level deeper for contact pages
       if (allEmails.size < 20) {
-        const subLinks = prioritizeLinks(extractLinks(html, domain))
+        const subLinks = prioritizeLinks(extractLinks(html, domain), intent)
           .filter((l) => !links.includes(l))
           .slice(0, 3);
         for (const subLink of subLinks) {
           if (allEmails.size >= 50) break;
-          const subHtml = await fetchWithTimeout(subLink, 5000);
+          const subHtml = await fetchWithTimeout(subLink, 5000, domain);
           pagesScanned += 1;
           if (subHtml) {
+            const [relevantPage] = await filterRelevantCompanies(intent, [{
+              ...verifiedMetadata,
+              domain,
+              source,
+              service_summary: verifiedMetadata.service_summary,
+              source_context: extractPageText(subHtml).slice(0, 1200),
+            }]);
+            if (!relevantPage) continue;
             extractEmailsFromHtml(subHtml).forEach((e) => allEmails.add(e));
           }
         }
@@ -256,13 +361,14 @@ async function scrapeDomain(domain: string): Promise<{
   const emails = Array.from(allEmails);
   if (emails.length === 0) {
     return {
+      ...verifiedMetadata,
       emails: [],
       pagesScanned,
       status: "no_emails",
       error: null,
     };
   }
-  return { emails, pagesScanned, status: "completed", error: null };
+  return { ...verifiedMetadata, emails, pagesScanned, status: "completed", error: null };
 }
 
 Deno.serve(async (req: Request) => {
@@ -348,6 +454,9 @@ Deno.serve(async (req: Request) => {
     const sourceQuery = typeof body.source_query === "string"
       ? body.source_query.trim().slice(0, 200) || null
       : null;
+    const intent = typeof body.intent === "string" && body.intent.trim()
+      ? body.intent.trim().slice(0, 200)
+      : sourceQuery ?? "";
     const requestedLabel = typeof body.batch_label === "string"
       ? body.batch_label.trim().slice(0, 120)
       : "";
@@ -376,6 +485,10 @@ Deno.serve(async (req: Request) => {
     const runId = run.id;
     const results: Array<{
       domain: string;
+      business_name: string;
+      service_summary: string;
+      category: string;
+      source: "website" | "maps";
       emails: string[];
       status: string;
       pages_scanned: number;
@@ -383,9 +496,13 @@ Deno.serve(async (req: Request) => {
     }> = [];
 
     for (const domain of domainsToProcess) {
-      const r = await scrapeDomain(domain);
+      const r = await scrapeDomain(domain, intent, sourceType);
       results.push({
         domain,
+        business_name: r.business_name,
+        service_summary: r.service_summary,
+        category: r.category,
+        source: sourceType,
         emails: r.emails,
         status: r.status,
         pages_scanned: r.pagesScanned,
@@ -395,6 +512,9 @@ Deno.serve(async (req: Request) => {
         run_id: runId,
         user_id: userId,
         domain,
+        business_name: r.business_name,
+        service_summary: r.service_summary,
+        category: r.category,
         emails: r.emails,
         status: r.status,
         pages_scanned: r.pagesScanned,

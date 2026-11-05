@@ -9,16 +9,28 @@ interface AdminUser {
   created_at: string;
   last_sign_in_at?: string;
   roles: string[];
-  credit_balance: { daily_remaining: number; purchased_credits: number; daily_reset_date: string } | null;
+  credit_balance: { daily_remaining: number; purchased_credits: number; subscription_remaining: number; subscription_expires_at: string | null; daily_reset_date: string } | null;
 }
 
 interface Overview {
   counts: Record<string, number>;
   system_settings: GlobalSettings;
+  search_services: SearchServices;
   users: AdminUser[];
   recent_runs: Array<{ id: string; user_id: string; domain: string; status: string; total_emails: number; created_at: string }>;
   audit_log: Array<{ id: string; actor_id: string | null; target_user_id: string | null; action: string; created_at: string }>;
 }
+
+interface SearchServices {
+  google_maps_api_key: boolean;
+  google_cse_api_key: boolean;
+  google_cse_id: boolean;
+  google_maps_api_key_source: "database" | "environment" | "none";
+  google_cse_api_key_source: "database" | "environment" | "none";
+  google_cse_id_source: "database" | "environment" | "none";
+}
+
+type SearchKeyName = "google_maps_api_key" | "google_cse_api_key" | "google_cse_id";
 
 interface GlobalSettings {
   allow_signups: boolean;
@@ -52,6 +64,7 @@ const countLabels: Record<string, string> = {
   discovery_searches: "Discovery searches",
   user_roles: "Assigned roles",
   admin_audit_log: "Admin actions",
+  credit_subscriptions: "Credit subscriptions",
 };
 
 export function AdminDashboard({ onUnauthorized }: { onUnauthorized: () => void }) {
@@ -61,6 +74,9 @@ export function AdminDashboard({ onUnauthorized }: { onUnauthorized: () => void 
   const [overview, setOverview] = useState<Overview | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<GlobalSettings | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
+  const [searchKeyDraft, setSearchKeyDraft] = useState<Record<SearchKeyName, string>>({ google_maps_api_key: "", google_cse_api_key: "", google_cse_id: "" });
+  const [clearSearchKey, setClearSearchKey] = useState<Record<SearchKeyName, boolean>>({ google_maps_api_key: false, google_cse_api_key: false, google_cse_id: false });
+  const [savingSearchKeys, setSavingSearchKeys] = useState(false);
   const [loading, setLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [contacts, setContacts] = useState<AdminContact[]>([]);
@@ -162,6 +178,24 @@ export function AdminDashboard({ onUnauthorized }: { onUnauthorized: () => void 
     await loadOverview();
   };
 
+  const saveSearchKeys = async () => {
+    setSavingSearchKeys(true);
+    setError("");
+    setNotice("");
+    const { data, error: invokeError } = await supabase.functions.invoke("admin-console", {
+      body: { action: "update_search_keys", keys: searchKeyDraft, clear: clearSearchKey },
+    });
+    setSavingSearchKeys(false);
+    if (invokeError || data?.error) {
+      setError(data?.error ?? invokeError?.message ?? "Could not save search provider credentials.");
+      return;
+    }
+    setOverview((current) => current ? { ...current, search_services: data.search_services as SearchServices } : current);
+    setSearchKeyDraft({ google_maps_api_key: "", google_cse_api_key: "", google_cse_id: "" });
+    setClearSearchKey({ google_maps_api_key: false, google_cse_api_key: false, google_cse_id: false });
+    setNotice("Search provider settings saved. Updated credentials are applied to new searches automatically.");
+  };
+
   const grantCredits = async (target: AdminUser) => {
     setNotice("");
     const { data, error: invokeError } = await supabase.functions.invoke("admin-console", {
@@ -215,11 +249,50 @@ export function AdminDashboard({ onUnauthorized }: { onUnauthorized: () => void 
             </div>
           </div>}
         </section>
+        <section className="mb-6 border border-neutral-200 bg-white rounded-lg">
+          <header className="p-5 border-b border-neutral-200"><h2 className="font-semibold">Search provider API keys</h2><p className="mt-1 text-sm text-neutral-500">Credentials are saved server-side and never returned to this page.</p></header>
+          <div className="grid gap-5 p-5 md:grid-cols-2">
+            {([
+              ["google_maps_api_key", "google_maps_api_key_source", "Google Maps Places API key"],
+              ["google_cse_api_key", "google_cse_api_key_source", "Google Custom Search API key"],
+              ["google_cse_id", "google_cse_id_source", "Google Custom Search engine ID"],
+            ] as const).map(([keyName, sourceKey, label]) => {
+              const configured = overview.search_services?.[keyName] ?? false;
+              const source = overview.search_services?.[sourceKey] ?? "none";
+              return <label key={keyName} className="block text-sm font-medium">
+                <span className="flex items-center justify-between gap-2"><span>{label}</span><span className={`text-xs font-medium ${configured ? "text-green-700" : "text-neutral-400"}`}>{source === "environment" ? "Configured via Edge secret" : configured ? "Configured" : "Not configured"}</span></span>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={searchKeyDraft[keyName]}
+                  onChange={(event) => {
+                    setSearchKeyDraft((current) => ({ ...current, [keyName]: event.target.value }));
+                    setClearSearchKey((current) => ({ ...current, [keyName]: false }));
+                  }}
+                  placeholder={configured ? "Saved securely; enter a new value to replace" : "Enter API credential"}
+                  className="mt-1.5 w-full rounded-lg border border-neutral-200 px-3 py-2.5 text-sm font-normal"
+                />
+                {source === "database" && <button type="button" onClick={() => {
+                  setSearchKeyDraft((current) => ({ ...current, [keyName]: "" }));
+                  setClearSearchKey((current) => ({ ...current, [keyName]: !current[keyName] }));
+                }} className={`mt-1 text-xs font-medium ${clearSearchKey[keyName] ? "text-red-700" : "text-neutral-500 hover:text-red-700"}`}>
+                  {clearSearchKey[keyName] ? "Key will be removed on save" : "Remove saved key"}
+                </button>}
+              </label>;
+            })}
+            <div className="md:col-span-2">
+              <button onClick={() => void saveSearchKeys()} disabled={savingSearchKeys} className="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">
+                {savingSearchKeys ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
+                Save search credentials
+              </button>
+            </div>
+          </div>
+        </section>
         <section className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3 mb-8">{Object.entries(overview.counts).map(([key, count]) => <div key={key} className="border border-neutral-200 bg-white rounded-lg p-4"><p className="text-xs text-neutral-500">{countLabels[key] ?? key}</p><p className="text-2xl font-semibold mt-2">{count.toLocaleString()}</p></div>)}</section>
         <div className="grid xl:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.7fr)] gap-6 items-start">
           <section className="border border-neutral-200 bg-white rounded-lg">
             <header className="p-5 border-b border-neutral-200 flex flex-wrap items-center justify-between gap-3"><h2 className="font-semibold flex items-center gap-2"><Users size={17} />Accounts</h2><div className="flex flex-wrap items-center gap-2"><label className="text-xs text-neutral-500">Grant<input type="number" min={1} max={100000000} value={creditGrantAmount} onChange={(event) => setCreditGrantAmount(Number(event.target.value))} className="ml-2 w-28 px-2 py-1.5 border border-neutral-200 rounded text-sm text-neutral-800" /></label><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter by email" className="max-w-56 min-w-0 px-3 py-2 border border-neutral-200 rounded-lg text-sm" /></div></header>
-            <div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-neutral-50 text-neutral-500"><tr><th className="p-3">Email</th><th className="p-3">Joined</th><th className="p-3">Last active</th><th className="p-3">Available credits</th><th className="p-3">Access</th></tr></thead><tbody className="divide-y divide-neutral-100">{filteredUsers.map((item) => <tr key={item.id}><td className="p-3">{item.email ?? "No email"}</td><td className="p-3 whitespace-nowrap">{new Date(item.created_at).toLocaleDateString()}</td><td className="p-3 whitespace-nowrap">{item.last_sign_in_at ? new Date(item.last_sign_in_at).toLocaleDateString() : "Never"}</td><td className="p-3"><span className="block whitespace-nowrap">{item.credit_balance ? (item.credit_balance.daily_remaining + item.credit_balance.purchased_credits).toLocaleString() : "Not initialized"}</span>{item.credit_balance && <span className="text-xs text-neutral-500">{item.credit_balance.daily_remaining.toLocaleString()} daily + {item.credit_balance.purchased_credits.toLocaleString()} wallet</span>}<button onClick={() => void grantCredits(item)} disabled={!Number.isInteger(creditGrantAmount) || creditGrantAmount < 1} className="mt-1 inline-flex items-center gap-1 px-2 py-1 border border-neutral-200 rounded text-xs hover:border-primary-300 hover:text-primary-700 disabled:opacity-50"><Coins size={12} />Grant</button></td><td className="p-3"><button onClick={() => void setRole(item, item.roles.includes("admin") ? "user" : "admin")} disabled={item.id === user?.id} className="px-2.5 py-1 border border-neutral-200 rounded text-xs disabled:opacity-50">{item.roles.includes("admin") ? "Remove admin" : "Make admin"}</button></td></tr>)}{filteredUsers.length === 0 && <tr><td colSpan={5} className="p-8 text-center text-neutral-500">No matching accounts.</td></tr>}</tbody></table></div>
+            <div className="overflow-x-auto"><table className="w-full text-sm text-left"><thead className="bg-neutral-50 text-neutral-500"><tr><th className="p-3">Email</th><th className="p-3">Joined</th><th className="p-3">Last active</th><th className="p-3">Available credits</th><th className="p-3">Access</th></tr></thead><tbody className="divide-y divide-neutral-100">{filteredUsers.map((item) => <tr key={item.id}><td className="p-3">{item.email ?? "No email"}</td><td className="p-3 whitespace-nowrap">{new Date(item.created_at).toLocaleDateString()}</td><td className="p-3 whitespace-nowrap">{item.last_sign_in_at ? new Date(item.last_sign_in_at).toLocaleDateString() : "Never"}</td><td className="p-3"><span className="block whitespace-nowrap">{item.credit_balance ? (Number(item.credit_balance.daily_remaining) + Number(item.credit_balance.subscription_remaining) + Number(item.credit_balance.purchased_credits)).toLocaleString() : "Not initialized"}</span>{item.credit_balance && <span className="text-xs text-neutral-500">{Number(item.credit_balance.daily_remaining).toLocaleString()} daily + {Number(item.credit_balance.subscription_remaining).toLocaleString()} plan + {Number(item.credit_balance.purchased_credits).toLocaleString()} wallet</span>}<button onClick={() => void grantCredits(item)} disabled={!Number.isInteger(creditGrantAmount) || creditGrantAmount < 1} className="mt-1 inline-flex items-center gap-1 px-2 py-1 border border-neutral-200 rounded text-xs hover:border-primary-300 hover:text-primary-700 disabled:opacity-50"><Coins size={12} />Grant</button></td><td className="p-3"><button onClick={() => void setRole(item, item.roles.includes("admin") ? "user" : "admin")} disabled={item.id === user?.id} className="px-2.5 py-1 border border-neutral-200 rounded text-xs disabled:opacity-50">{item.roles.includes("admin") ? "Remove admin" : "Make admin"}</button></td></tr>)}{filteredUsers.length === 0 && <tr><td colSpan={5} className="p-8 text-center text-neutral-500">No matching accounts.</td></tr>}</tbody></table></div>
             <p className="p-4 border-t border-neutral-200 text-xs text-neutral-500">Showing up to 100 accounts.</p>
           </section>
           <div className="space-y-6">

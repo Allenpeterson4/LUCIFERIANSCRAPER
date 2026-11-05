@@ -258,6 +258,33 @@ Deno.serve(async (req: Request) => {
       return data as DispatchMessage;
     };
 
+    const rawReplyDomain = Deno.env.get("REPLY_TRACKING_DOMAIN")?.trim().toLowerCase().replace(/^@/, "") ?? "";
+    const replyTrackingDomain = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/.test(rawReplyDomain)
+      ? rawReplyDomain
+      : null;
+
+    const createReplyTracking = async (item: DispatchCampaign, ownerId: string, messageId: string, recipient: string) => {
+      if (!replyTrackingDomain) return null;
+      const token = crypto.randomUUID().replace(/-/g, "");
+      const address = `reply+${token}@${replyTrackingDomain}`;
+      const normalizedRecipient = recipient.trim().toLowerCase();
+      const { data: contact, error: contactError } = await supabase.from("email_contacts")
+        .select("id").eq("user_id", ownerId).eq("email", normalizedRecipient).maybeSingle();
+      if (contactError) throw new Error("Could not prepare reply tracking for this recipient.");
+      const { error } = await supabase.from("email_reply_tracking").insert({
+        token,
+        user_id: ownerId,
+        campaign_queue_id: item.id,
+        message_id: messageId,
+        contact_id: contact?.id ?? null,
+        recipient_email: normalizedRecipient,
+        reply_to_address: address,
+        sent_at: new Date().toISOString(),
+      });
+      if (error) throw new Error("Could not prepare reply tracking for this recipient.");
+      return { token, address };
+    };
+
     const processCampaign = async (item: DispatchCampaign) => {
       const ownerId = String(item.user_id);
       const config = await fetchConfig(item.smtp_config_id, ownerId);
@@ -310,9 +337,12 @@ Deno.serve(async (req: Request) => {
 
           attempts++;
           if (!client) client = await createSmtpClient(config);
+          let replyTracking: { token: string; address: string } | null = null;
           try {
+            replyTracking = await createReplyTracking(item, ownerId, message.id, recipient);
             await client.send({
               from: config.from_name ? `${config.from_name} <${config.from_email}>` : config.from_email,
+              ...(replyTracking ? { replyTo: replyTracking.address } : {}),
               to: recipient,
               subject: message.subject,
               content: message.format === "html" ? htmlToPlainText(message.body) : message.body,
@@ -320,6 +350,9 @@ Deno.serve(async (req: Request) => {
             });
             sent++;
           } catch (error) {
+            if (replyTracking) {
+              await supabase.from("email_reply_tracking").delete().eq("token", replyTracking.token);
+            }
             const providerMessage = errorMessage(error);
             if (isTemporaryDeliveryFailure(error)) {
               if (isProviderThrottle(error)) {
@@ -490,8 +523,8 @@ Deno.serve(async (req: Request) => {
       }
       const ownerId = userId!;
       const uniqueRecipients = [...new Set(recipients.map((recipient) => recipient.trim().toLowerCase()).filter(Boolean))];
-      if (uniqueRecipients.length > 20000) {
-        return new Response(JSON.stringify({ error: "A campaign cannot contain more than 20,000 recipients." }), {
+      if (uniqueRecipients.length === 0) {
+        return new Response(JSON.stringify({ error: "No valid recipients provided." }), {
           status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
@@ -512,18 +545,27 @@ Deno.serve(async (req: Request) => {
           status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-      const { data: campaign, error } = await supabase.from("campaign_queue").insert({
-        user_id: ownerId,
-        message_id: message.id,
-        smtp_config_id: config.id,
-        recipients: uniqueRecipients,
-        source_batch_id: typeof body.sourceBatchId === "string" ? body.sourceBatchId : null,
-        batch_label: typeof body.batchLabel === "string" ? body.batchLabel.slice(0, 120) : null,
-        status: "queued",
-        batch_size: 100,
-        next_batch_at: new Date().toISOString(),
-      }).select("id").single();
-      if (error || !campaign) {
+      const campaignChunkSize = 20000;
+      const campaignCount = Math.ceil(uniqueRecipients.length / campaignChunkSize);
+      const requestedBatchLabel = typeof body.batchLabel === "string" ? body.batchLabel.trim().slice(0, 100) : "";
+      const campaignRows = Array.from({ length: campaignCount }, (_, index) => {
+        const chunkLabel = campaignCount > 1
+          ? `${requestedBatchLabel || "Campaign"} (${index + 1}/${campaignCount})`
+          : requestedBatchLabel || null;
+        return {
+          user_id: ownerId,
+          message_id: message.id,
+          smtp_config_id: config.id,
+          recipients: uniqueRecipients.slice(index * campaignChunkSize, (index + 1) * campaignChunkSize),
+          source_batch_id: typeof body.sourceBatchId === "string" ? body.sourceBatchId : null,
+          batch_label: chunkLabel,
+          status: "queued",
+          batch_size: 100,
+          next_batch_at: new Date().toISOString(),
+        };
+      });
+      const { data: campaigns, error } = await supabase.from("campaign_queue").insert(campaignRows).select("id");
+      if (error || !campaigns || campaigns.length !== campaignCount) {
         return new Response(JSON.stringify({ error: "Could not queue campaign for adaptive dispatch." }), {
           status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
@@ -531,8 +573,9 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({
         success: true,
         total: uniqueRecipients.length,
+        queued_campaigns: campaignCount,
         credits_remaining: creditResult.total_remaining,
-        message: `Queued ${uniqueRecipients.length} recipients. Provider-aware background dispatch will regulate delivery automatically.`,
+        message: `Scheduled ${uniqueRecipients.length} recipients across ${campaignCount} adaptive queue${campaignCount === 1 ? "" : "s"}. Delivery will follow the selected SMTP provider's limits.`,
       }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 

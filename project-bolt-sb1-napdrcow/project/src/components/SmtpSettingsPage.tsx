@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AlertCircle, Activity, Check, CheckCircle2, Clock, Loader2, RefreshCw, Server, Trash2, Zap } from "lucide-react";
+import { AlertCircle, Activity, Check, CheckCircle2, Clock, Edit2, Loader2, Plus, RefreshCw, Server, Trash2, Zap } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/auth";
 import { testSmtpConnection } from "@/lib/smtp";
@@ -35,6 +35,7 @@ export function SmtpSettingsPage() {
   const { session, user } = useAuth();
   const [configs, setConfigs] = useState<SmtpSettings[]>([]);
   const [config, setConfig] = useState<SmtpSettings | null>(null);
+  const [configureOpen, setConfigureOpen] = useState(false);
   const [host, setHost] = useState("");
   const [port, setPort] = useState(587);
   const [username, setUsername] = useState("");
@@ -116,13 +117,12 @@ export function SmtpSettingsPage() {
     const payload: Record<string, unknown> = {
       host: host.trim(), port: Number(port), username: username.trim(), encryption,
       from_email: fromEmail.trim(), from_name: fromName.trim() || null,
-      is_active: true,
     };
     if (password) payload.password = password;
     const isEdit = Boolean(config);
     const { data, error } = isEdit
       ? await supabase.from("smtp_configs").update(payload).eq("id", config!.id).select("id").single()
-      : await supabase.from("smtp_configs").insert({ ...payload, password, user_id: user?.id }).select("id").single();
+      : await supabase.from("smtp_configs").insert({ ...payload, is_active: false, password, user_id: user?.id }).select("id").single();
     setSaving(false);
     if (error) {
       setFeedback({ success: false, message: error.message });
@@ -135,13 +135,17 @@ export function SmtpSettingsPage() {
         .select("id,host,port,username,encryption,from_email,from_name,is_active")
         .eq("id", savedId).maybeSingle();
       if (refreshed) {
-        const all = [...configs.filter((item) => item.id !== savedId), refreshed as SmtpSettings];
-        setConfigs(all);
-        setConfig(refreshed as SmtpSettings);
+        const activeConfig = { ...refreshed, is_active: true } as SmtpSettings;
         await supabase.from("smtp_configs").update({ is_active: false }).eq("user_id", user?.id ?? "").neq("id", savedId);
         await supabase.from("smtp_configs").update({ is_active: true }).eq("id", savedId);
+        setConfigs((current) => [
+          ...current.filter((item) => item.id !== savedId).map((item) => ({ ...item, is_active: false })),
+          activeConfig,
+        ]);
+        setConfig(activeConfig);
       }
       setPassword("");
+      setConfigureOpen(false);
       setFeedback({ success: true, message: isEdit ? "SMTP account updated." : "SMTP account saved." });
       return;
     }
@@ -165,6 +169,18 @@ export function SmtpSettingsPage() {
     setConfigs((current) => current.map((item) => ({ ...item, is_active: item.id === id }))); 
     if (next) applyConfig(next);
     setFeedback({ success: true, message: "Active SMTP account updated." });
+  };
+
+  const configureNewAccount = () => {
+    applyConfig(null);
+    setConfigureOpen(true);
+    setFeedback(null);
+  };
+
+  const editConfig = (saved: SmtpSettings) => {
+    applyConfig(saved);
+    setConfigureOpen(true);
+    setFeedback(null);
   };
 
   const removeConfig = async (id: string) => {
@@ -202,24 +218,35 @@ export function SmtpSettingsPage() {
         <p className="text-neutral-600">Configure and test the mail server used by your message campaigns.</p>
       </header>
 
-      <section className="border border-neutral-200 bg-white rounded-lg p-6">
-        {loading ? <div className="flex items-center gap-2 py-8 text-neutral-500"><Loader2 className="animate-spin" size={18} />Loading settings</div> : <>
-          <div className="flex items-center justify-between gap-3 mb-4">
-            <div className="flex items-center gap-3"><div className="p-2 rounded-lg bg-neutral-100"><Server size={19} /></div><div><h2 className="font-semibold">Outgoing mail servers</h2><p className="text-xs text-neutral-500">Store multiple accounts and switch the active one per campaign.</p></div></div>
-            <button onClick={() => applyConfig(null)} className="px-3 py-2 border border-neutral-200 rounded-lg text-sm font-medium">New account</button>
-          </div>
-          {configs.length > 0 && <div className="mb-6 grid gap-2 sm:grid-cols-2">
-            {configs.map((item) => <button key={item.id} onClick={() => { void selectConfig(item.id); }} className={`flex items-center justify-between gap-2 rounded-lg border p-3 text-left ${config?.id === item.id ? "border-primary-300 bg-primary-50" : "border-neutral-200 bg-white"}`}>
-              <div>
-                <p className="text-sm font-medium text-neutral-800">{item.from_name || item.from_email}</p>
-                <p className="text-xs text-neutral-500">{item.host} · {item.from_email}</p>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${item.is_active ? "bg-green-100 text-green-700" : "bg-neutral-100 text-neutral-500"}`}>{item.is_active ? "Active" : "Saved"}</span>
-                <button onClick={(event) => { event.stopPropagation(); void removeConfig(item.id); }} className="p-1.5 rounded text-neutral-500 hover:text-red-700" aria-label={`Delete ${item.from_email}`}><Trash2 size={14} /></button>
-              </div>
-            </button>)}
-          </div>}
+      {feedback && <div role={feedback.success ? "status" : "alert"} className={`mb-5 flex items-start gap-2 p-3 border rounded-lg text-sm ${feedback.success ? "border-green-300 bg-green-50 text-green-800" : "border-red-300 bg-red-50 text-red-700"}`}>
+        {feedback.success ? <CheckCircle2 size={16} className="shrink-0 mt-0.5" /> : <AlertCircle size={16} className="shrink-0 mt-0.5" />}{feedback.message}
+      </div>}
+      <section className="border border-neutral-200 bg-white rounded-lg overflow-hidden">
+        <header className="flex flex-wrap items-center justify-between gap-3 p-5 border-b border-neutral-200">
+          <div className="flex items-center gap-3"><div className="p-2 rounded-lg bg-neutral-100"><Server size={19} /></div><div><h2 className="font-semibold">Saved SMTP accounts</h2><p className="text-xs text-neutral-500">Choose the account used by new campaigns.</p></div></div>
+          <button onClick={configureNewAccount} className="inline-flex items-center gap-2 px-3 py-2 bg-primary-600 text-white rounded-lg text-sm font-medium"><Plus size={16} />Add SMTP account</button>
+        </header>
+        {loading ? <div className="flex items-center gap-2 p-8 text-neutral-500"><Loader2 className="animate-spin" size={18} />Loading accounts</div> : configs.length === 0 ? <div className="p-8 text-center"><p className="text-sm text-neutral-600">No SMTP accounts saved yet.</p><button onClick={configureNewAccount} className="mt-3 inline-flex items-center gap-2 px-3 py-2 border border-neutral-200 rounded-lg text-sm font-medium"><Plus size={15} />Configure your first account</button></div> : <div className="divide-y divide-neutral-100">
+          {configs.map((item) => <article key={item.id} className="flex flex-wrap items-center justify-between gap-3 p-4">
+            <button type="button" onClick={() => { void selectConfig(item.id); }} aria-pressed={item.is_active} className="min-w-0 flex-1 text-left">
+              <span className="block truncate text-sm font-medium text-neutral-800">{item.from_name || item.from_email}</span>
+              <span className="mt-1 block truncate text-xs text-neutral-500">{item.host} · {item.from_email}</span>
+            </button>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className={`rounded-full px-2 py-1 text-[10px] font-medium ${item.is_active ? "bg-green-100 text-green-700" : "bg-neutral-100 text-neutral-500"}`}>{item.is_active ? "Active" : "Saved"}</span>
+              <button onClick={() => editConfig(item)} className="p-2 rounded text-neutral-500 hover:text-primary-700" aria-label={`Edit ${item.from_email}`} title="Edit SMTP account"><Edit2 size={15} /></button>
+              <button onClick={() => void removeConfig(item.id)} className="p-2 rounded text-neutral-500 hover:text-red-700" aria-label={`Delete ${item.from_email}`} title="Delete SMTP account"><Trash2 size={15} /></button>
+            </div>
+          </article>)}
+        </div>}
+      </section>
+      <section className="mt-6 border border-neutral-200 bg-white rounded-lg overflow-hidden">
+        <header className="flex flex-wrap items-center justify-between gap-3 p-5">
+          <div><h2 className="font-semibold">Configure an account</h2><p className="mt-1 text-xs text-neutral-500">Add a server or edit a saved account’s connection details.</p></div>
+          <button onClick={configureOpen ? () => setConfigureOpen(false) : configureNewAccount} className="px-3 py-2 border border-neutral-200 rounded-lg text-sm font-medium">{configureOpen ? "Close configuration" : "Configure account"}</button>
+        </header>
+        {configureOpen && <div className="border-t border-neutral-200 p-5">
+          <h3 className="mb-4 text-sm font-semibold">{config ? `Edit ${config.from_email}` : "New SMTP account"}</h3>
           <div className="grid sm:grid-cols-2 gap-4">
             <label className="text-sm font-medium">Host<input value={host} onChange={(event) => setHost(event.target.value)} placeholder="smtp.example.com" autoComplete="off" className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg text-sm" /></label>
             <label className="text-sm font-medium">Port<input type="number" min={1} max={65535} value={port} onChange={(event) => setPort(Number(event.target.value))} className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg text-sm" /></label>
@@ -229,14 +256,11 @@ export function SmtpSettingsPage() {
             <label className="text-sm font-medium">From email<input type="email" value={fromEmail} onChange={(event) => setFromEmail(event.target.value)} autoComplete="email" className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg text-sm" /></label>
             <label className="text-sm font-medium">From name<input value={fromName} onChange={(event) => setFromName(event.target.value)} className="mt-1.5 w-full px-3 py-2.5 border border-neutral-200 rounded-lg text-sm" /></label>
           </div>
-          {feedback && <div role={feedback.success ? "status" : "alert"} className={`mt-5 flex items-start gap-2 p-3 border rounded-lg text-sm ${feedback.success ? "border-green-300 bg-green-50 text-green-800" : "border-red-300 bg-red-50 text-red-700"}`}>
-            {feedback.success ? <CheckCircle2 size={16} className="shrink-0 mt-0.5" /> : <AlertCircle size={16} className="shrink-0 mt-0.5" />}{feedback.message}
-          </div>}
           <div className="flex flex-wrap gap-3 mt-6">
             <button onClick={save} disabled={saving} className="inline-flex items-center gap-2 px-4 py-2.5 bg-primary-600 text-white rounded-lg text-sm font-medium disabled:opacity-50">{saving ? <Loader2 className="animate-spin" size={16} /> : <Check size={16} />}Save settings</button>
             <button onClick={test} disabled={testing || !config} className="inline-flex items-center gap-2 px-4 py-2.5 border border-neutral-200 rounded-lg text-sm font-medium disabled:opacity-50">{testing ? <Loader2 className="animate-spin" size={16} /> : <Zap size={16} />}Send test email</button>
           </div>
-        </>}
+        </div>}
       </section>
       {config && <section className="mt-6 border border-neutral-200 bg-white rounded-lg">
         <header className="p-5 border-b border-neutral-200 flex items-center justify-between gap-3">

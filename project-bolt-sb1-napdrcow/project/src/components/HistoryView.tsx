@@ -20,10 +20,11 @@ import type { ScrapeCampaignBatch, ScrapingRun, ScrapeResult } from "@/lib/types
 
 interface HistoryViewProps {
   sourceType: "website" | "maps";
+  title?: string;
   onSendCampaign?: (batch: ScrapeCampaignBatch) => void;
 }
 
-export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
+export function HistoryView({ sourceType, title, onSendCampaign }: HistoryViewProps) {
   const [runs, setRuns] = useState<ScrapingRun[]>([]);
   const [resultsByRun, setResultsByRun] = useState<Record<string, ScrapeResult[]>>({});
   const [loading, setLoading] = useState(true);
@@ -158,12 +159,21 @@ export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
 
   const exportRunCsv = async (run: ScrapingRun) => {
     const results = await loadResults(run.id);
-    const rows = ["Extracted At,Batch,Target,Domain,Email,Status,Pages Scanned"];
+    const rows = ["Extracted At,Batch,Target,Business Name,Domain,Core Services,Category,Email,Status,Pages Scanned"];
     for (const result of results) {
+      const company = [
+        formatDate(run.created_at),
+        run.batch_label || run.domain,
+        run.source_query || run.domain,
+        result.business_name || result.domain,
+        result.domain,
+        result.service_summary ?? "",
+        result.category ?? "",
+      ];
       if (result.emails.length === 0) {
-        rows.push([formatDate(run.created_at), run.batch_label || run.domain, run.source_query || run.domain, result.domain, "", result.status, String(result.pages_scanned)].map(escapeCsv).join(","));
+        rows.push([...company, "", result.status, String(result.pages_scanned)].map(escapeCsv).join(","));
       } else {
-        for (const email of result.emails) rows.push([formatDate(run.created_at), run.batch_label || run.domain, run.source_query || run.domain, result.domain, email, result.status, String(result.pages_scanned)].map(escapeCsv).join(","));
+        for (const email of result.emails) rows.push([...company, email, result.status, String(result.pages_scanned)].map(escapeCsv).join(","));
       }
     }
     const url = URL.createObjectURL(new Blob([rows.join("\r\n")], { type: "text/csv;charset=utf-8" }));
@@ -183,7 +193,7 @@ export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
     const results = await loadResults(run.id);
     const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!);
     const emails = results.flatMap((result) => result.emails);
-    printWindow.document.write(`<!doctype html><title>Scrape batch</title><style>body{font:12px Arial,sans-serif;padding:24px;color:#111}h1{font-size:20px}p{margin:5px 0}table{width:100%;border-collapse:collapse;margin-top:18px}td,th{text-align:left;padding:7px;border-bottom:1px solid #ddd;overflow-wrap:anywhere}</style><h1>${escapeHtml(run.batch_label || run.domain)}</h1><p>${escapeHtml(formatDate(run.created_at))}</p><p>${escapeHtml(run.source_query || run.domain)} · ${emails.length} emails</p><table><thead><tr><th>Domain</th><th>Email</th></tr></thead><tbody>${results.flatMap((result) => result.emails.map((email) => `<tr><td>${escapeHtml(result.domain)}</td><td>${escapeHtml(email)}</td></tr>`)).join("")}</tbody></table>`);
+    printWindow.document.write(`<!doctype html><title>Scrape batch</title><style>body{font:12px Arial,sans-serif;padding:24px;color:#111}h1{font-size:20px}p{margin:5px 0}table{width:100%;border-collapse:collapse;margin-top:18px}td,th{text-align:left;padding:7px;border-bottom:1px solid #ddd;overflow-wrap:anywhere}</style><h1>${escapeHtml(run.batch_label || run.domain)}</h1><p>${escapeHtml(formatDate(run.created_at))}</p><p>${escapeHtml(run.source_query || run.domain)} · ${emails.length} emails</p><table><thead><tr><th>Business Name</th><th>Domain</th><th>Core Services</th><th>Category</th><th>Email</th></tr></thead><tbody>${results.flatMap((result) => (result.emails.length ? result.emails : [""]).map((email) => `<tr><td>${escapeHtml(result.business_name || result.domain)}</td><td>${escapeHtml(result.domain)}</td><td>${escapeHtml(result.service_summary ?? "")}</td><td>${escapeHtml(result.category ?? "")}</td><td>${escapeHtml(email)}</td></tr>`)).join("")}</tbody></table>`);
     printWindow.document.close();
     printWindow.focus();
     printWindow.print();
@@ -201,7 +211,7 @@ export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
 
   const exportCsv = async () => {
     const allRows: string[] = [
-      "Source,Batch Label,Search Query,Run Date,Domain,Status,Emails,Pages Scanned,Error",
+      "Source,Batch Label,Search Query,Run Date,Business Name,Domain,Core Services,Category,Status,Emails,Pages Scanned,Error",
     ];
 
     for (const run of runs) {
@@ -220,16 +230,12 @@ export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
       const runType = run.is_bulk ? "Bulk" : "Single";
       const dateStr = formatDate(run.created_at);
       if (!resList || resList.length === 0) {
-        allRows.push(
-          `${escapeCsv(run.source_type)},${escapeCsv(run.batch_label || run.domain)},${escapeCsv(run.source_query ?? "")},${escapeCsv(dateStr)},${escapeCsv(run.domain)},${escapeCsv(run.status)},0,0,`
-        );
+        allRows.push([run.source_type, run.batch_label || run.domain, run.source_query ?? "", dateStr, run.domain, run.domain, "", "", run.status, "0", "0", ""].map(escapeCsv).join(","));
         continue;
       }
       for (const res of resList) {
         const emailsJoined = res.emails.join("; ");
-        allRows.push(
-          `${escapeCsv(run.source_type)},${escapeCsv(run.batch_label || runType)},${escapeCsv(run.source_query ?? "")},${escapeCsv(dateStr)},${escapeCsv(res.domain)},${escapeCsv(res.status)},${escapeCsv(emailsJoined)},${res.pages_scanned},${escapeCsv(res.error ?? "")}`
-        );
+        allRows.push([run.source_type, run.batch_label || runType, run.source_query ?? "", dateStr, res.business_name || res.domain, res.domain, res.service_summary ?? "", res.category ?? "", res.status, emailsJoined, String(res.pages_scanned), res.error ?? ""].map(escapeCsv).join(","));
       }
     }
 
@@ -248,7 +254,7 @@ export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10 animate-fade-in">
       <div className="flex flex-wrap items-end justify-between gap-4 mb-8">
         <div>
-          <h1 className="text-3xl font-bold mb-2">{sourceType === "maps" ? "Maps scraper history" : "Website scraper history"}</h1>
+          <h1 className="text-3xl font-bold mb-2">{title ?? (sourceType === "maps" ? "Maps scraper history" : "Email scraper history")}</h1>
           <p className="text-neutral-600">
             Dated batches, extracted contacts, and campaign actions.
           </p>
@@ -260,21 +266,63 @@ export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
         </div>
       </div>
 
-      {loading && (
+      {sourceType === "website" && <div className="space-y-3">
+        {loading && <div className="bg-white rounded-2xl border border-neutral-200 p-8 text-center"><Loader2 size={26} className="animate-spin text-primary-600 mx-auto mb-2" /><p className="text-neutral-500 text-sm">Loading scrape history...</p></div>}
+        {error && <div role="alert" className="flex items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"><AlertCircle size={17} />{error}</div>}
+        {!loading && !error && runs.length === 0 && <div className="bg-white rounded-2xl border border-neutral-200 p-10 text-center"><Inbox size={36} className="text-neutral-300 mx-auto mb-3" /><p className="text-neutral-600 text-sm">No website scrapes yet.</p></div>}
+        {!loading && runs.map((run) => {
+          const results = resultsByRun[run.id];
+          const isOpen = expanded.has(run.id);
+          return <article key={run.id} className="bg-white rounded-2xl border border-neutral-200 overflow-hidden">
+            <div className="flex items-center gap-3 px-5 py-4">
+              <button onClick={() => toggleRun(run.id)} aria-expanded={isOpen} className="flex min-w-0 flex-1 items-center gap-3 text-left">
+                {isOpen ? <ChevronDown size={18} className="shrink-0 text-neutral-400" /> : <ChevronRight size={18} className="shrink-0 text-neutral-400" />}
+                <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg ${run.is_bulk ? "bg-primary-50 text-primary-600" : "bg-neutral-100 text-neutral-500"}`}>{run.is_bulk ? <Layers size={18} /> : <Globe size={18} />}</div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="truncate text-sm font-medium text-neutral-800">{run.batch_label || run.domain}</span>
+                    <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-xs font-medium text-neutral-600">{run.is_bulk ? "Bulk domains" : "Single domain"}</span>
+                    <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${run.status === "completed" ? "bg-accent-50 text-accent-700" : run.status === "failed" ? "bg-red-50 text-red-600" : "bg-neutral-100 text-neutral-500"}`}>{run.status}</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs text-neutral-400"><Calendar size={12} />{formatDate(run.created_at)}<span className="truncate">Target: {run.domain}</span></div>
+                </div>
+              </button>
+              <div className="flex shrink-0 items-center gap-3">
+                <div className="text-right"><p className="text-sm font-semibold text-neutral-800">{run.total_emails.toLocaleString()}</p><p className="text-xs text-neutral-400">emails</p></div>
+                <button onClick={() => void deleteRun(run.id)} disabled={deleting === run.id} title="Delete scrape history" aria-label="Delete scrape history" className="rounded-lg p-2 text-neutral-400 transition-colors hover:bg-red-50 hover:text-red-600 disabled:opacity-50">{deleting === run.id ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}</button>
+              </div>
+            </div>
+            {isOpen && <div className="border-t border-neutral-100 px-5 py-4">
+              {!results ? <div className="flex items-center gap-2 py-3 text-sm text-neutral-400"><Loader2 size={16} className="animate-spin" />Loading targets...</div> : results.length === 0 ? <p className="py-3 text-sm text-neutral-500">No target domains were recorded.</p> : <>
+                <div className="mb-3"><p className="text-xs font-semibold uppercase text-neutral-500">Target domains ({results.length})</p><div className="mt-2 flex flex-wrap gap-2">{results.map((result) => <span key={result.id} className="rounded border border-neutral-200 bg-neutral-50 px-2 py-1 font-mono text-xs text-neutral-700">{result.domain}</span>)}</div></div>
+                <div className="divide-y divide-neutral-100">
+                  {results.map((result) => <div key={result.id} className="py-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2"><div className="min-w-0"><p className="truncate text-sm font-medium text-neutral-800">{result.business_name || result.domain}</p><p className="font-mono text-xs text-neutral-500">{result.domain}</p>{result.service_summary && <p className="mt-1 text-xs text-neutral-600">{result.service_summary}</p>}{result.category && <p className="mt-1 text-xs font-medium text-primary-700">{result.category}</p>}</div><span className="shrink-0 text-xs text-neutral-500">{result.emails.length} emails · {result.status}</span></div>
+                    {result.emails.length > 0 && <p className="mt-2 break-all text-xs text-neutral-500">{result.emails.join(", ")}</p>}
+                    {result.error && <p className="mt-2 text-xs text-red-600">{result.error}</p>}
+                  </div>)}
+                </div>
+              </>}
+            </div>}
+          </article>;
+        })}
+      </div>}
+
+      {sourceType !== "website" && loading && (
         <div className="bg-white rounded-2xl border border-neutral-200 p-10 text-center">
           <Loader2 size={32} className="animate-spin text-primary-600 mx-auto mb-3" />
           <p className="text-neutral-500">Loading your history...</p>
         </div>
       )}
 
-      {error && (
+      {sourceType !== "website" && error && (
         <div className="flex items-start gap-3 bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-6">
           <AlertCircle size={20} className="text-red-600 shrink-0 mt-0.5" />
           <p className="text-sm text-red-700">{error}</p>
         </div>
       )}
 
-      {!loading && !error && runs.length === 0 && (
+      {sourceType !== "website" && !loading && !error && runs.length === 0 && (
         <div className="bg-white rounded-2xl border border-neutral-200 p-12 text-center">
           <Inbox size={40} className="text-neutral-300 mx-auto mb-4" />
           <h3 className="font-semibold text-neutral-700 mb-1">No scraping history yet</h3>
@@ -282,7 +330,7 @@ export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
         </div>
       )}
 
-      {!loading && runs.length > 0 && (
+      {sourceType !== "website" && !loading && runs.length > 0 && (
         <div className="space-y-7">
           {groupedRuns().map(([groupName, groupRuns]) => (
             <section key={groupName}>
@@ -329,11 +377,15 @@ export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
                         >
                           {run.status}
                         </span>
+                        <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-neutral-100 text-neutral-600">
+                          {run.is_bulk ? "Bulk domains" : "Single domain"}
+                        </span>
                       </div>
                       <div className="flex items-center gap-1 text-xs text-neutral-400 mt-0.5">
                         <Calendar size={12} />
                         {formatDate(run.created_at)}
-                        <span className="ml-2 truncate">{run.source_query || run.domain}</span>
+                        <span className="ml-2 truncate">Target: {run.domain}</span>
+                        {run.source_query && <span className="ml-2 truncate">Search: {run.source_query}</span>}
                       </div>
                     </div>
                   </button>
@@ -373,13 +425,29 @@ export function HistoryView({ sourceType, onSendCampaign }: HistoryViewProps) {
                       <p className="text-sm text-neutral-500 py-3">No domain results found.</p>
                     ) : (
                       <div className="space-y-4">
+                        <section aria-label="Scrape details" className="rounded-lg border border-neutral-200 bg-neutral-50 p-4">
+                          <div className="grid gap-3 sm:grid-cols-3 text-sm">
+                            <div><p className="text-xs font-medium text-neutral-500">Scrape type</p><p className="mt-1 font-medium">{run.is_bulk ? "Bulk domains" : "Single domain"}</p></div>
+                            <div><p className="text-xs font-medium text-neutral-500">Emails extracted</p><p className="mt-1 font-medium">{run.total_emails.toLocaleString()}</p></div>
+                            <div><p className="text-xs font-medium text-neutral-500">Timestamp</p><p className="mt-1 font-medium">{formatDate(run.created_at)}</p></div>
+                          </div>
+                          <div className="mt-4 border-t border-neutral-200 pt-3">
+                            <p className="text-xs font-medium text-neutral-500">Target domains ({results.length})</p>
+                            <div className="mt-2 flex flex-wrap gap-2">{results.map((result) => <span key={result.id} className="rounded border border-neutral-200 bg-white px-2 py-1 font-mono text-xs text-neutral-700">{result.domain}</span>)}</div>
+                          </div>
+                        </section>
                         {results.map((res) => (
                           <div key={res.id} className="border border-neutral-100 rounded-lg p-4">
                             <div className="flex items-center gap-2 mb-3">
                               <Globe size={15} className="text-primary-600 shrink-0" />
-                              <span className="font-mono text-sm font-medium text-neutral-800">
-                                {res.domain}
-                              </span>
+                              <div className="min-w-0 flex-1">
+                                <span className="block text-[10px] font-semibold uppercase text-neutral-500">Business Name</span>
+                                <span className="block truncate text-sm font-medium text-neutral-800">{res.business_name || res.domain}</span>
+                                <span className="mt-1 block text-[10px] font-semibold uppercase text-neutral-500">Domain</span>
+                                <span className="block truncate font-mono text-xs text-neutral-700">{res.domain}</span>
+                                {res.category && <span className="mt-1 block text-xs font-medium text-primary-700">{res.category}</span>}
+                                {res.service_summary && <span className="mt-1 block text-sm text-neutral-600">{res.service_summary}</span>}
+                              </div>
                               <span
                                 className={`text-xs px-2 py-0.5 rounded-full ${
                                   res.status === "completed"

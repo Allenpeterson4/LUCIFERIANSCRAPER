@@ -30,6 +30,8 @@ import { KeywordSearchPanel } from "@/components/KeywordSearchPanel";
 interface ParsedDomain {
   domain: string;
   name: string | null;
+  business_name: string;
+  service_summary: string;
   category: string;
   source_page_url: string | null;
 }
@@ -43,6 +45,7 @@ interface DomainScrapingProps {
 export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapingProps) {
   const { session } = useAuth();
   const [url, setUrl] = useState("");
+  const [businessFocus, setBusinessFocus] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingAction, setLoadingAction] = useState<"preview" | "extract">("preview");
   const [error, setError] = useState<string | null>(null);
@@ -118,7 +121,7 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
     setSelected(new Set());
 
     try {
-      const data = await previewDomainDirectory(url, session!.access_token);
+      const data = await previewDomainDirectory(url, session!.access_token, businessFocus);
       setDirectoryPreview(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not locate a directory on this site.");
@@ -134,7 +137,7 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
     setLoadingAction("extract");
 
     try {
-      const data = await extractDomainDirectory(url, directoryPreview.directory_url, session!.access_token);
+      const data = await extractDomainDirectory(url, directoryPreview.directory_url, session!.access_token, businessFocus);
       setParseResult(data);
       setSelected(new Set(data.domains.map((d) => d.domain)));
       setDirectoryPreview(null);
@@ -218,9 +221,16 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
 
       {/* URL Input */}
       <div className="bg-white rounded-2xl border border-neutral-200 p-6 mb-6">
-        <label className="block text-sm font-medium text-neutral-700 mb-2">
-          Website domain or directory URL
+        <label className="mb-4 block text-sm font-medium text-neutral-700">
+          Business focus <span className="font-normal text-neutral-400">(optional)</span>
+          <input value={businessFocus} onChange={(event) => setBusinessFocus(event.target.value)} maxLength={200} placeholder="e.g. construction companies or educational institutes" className="mt-1.5 w-full px-3 py-2.5 rounded-lg border border-neutral-200 focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none text-sm" />
         </label>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <label className="text-sm font-medium text-neutral-700">Website domain or directory URL</label>
+          <button onClick={() => setWebsiteHistoryOpen((open) => !open)} className="inline-flex items-center gap-2 px-3 py-1.5 border border-neutral-200 bg-white rounded-lg text-xs font-medium">
+            <Inbox size={14} />{websiteHistoryOpen ? "Hide Domain scraper history" : "Domain scraper history"}
+          </button>
+        </div>
         <div className="flex flex-col sm:flex-row gap-3">
           <div className="flex-1 relative">
             <Link2 size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-neutral-400" />
@@ -244,6 +254,8 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
         </div>
       </div>
 
+      {websiteHistoryOpen && <div id="website-scrape-history" className="mb-6"><HistoryView sourceType="website" title="Domain scraper history" onSendCampaign={onSendCampaign} /></div>}
+
       {error && (
         <div className="flex items-start gap-3 bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-6 animate-slide-in">
           <AlertCircle size={20} className="text-red-600 shrink-0 mt-0.5" />
@@ -261,6 +273,7 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
               <p className="text-sm font-semibold text-neutral-800">Directory found</p>
               <p className="mt-1 text-2xl font-bold text-primary-700">{directoryPreview.total_listings.toLocaleString()} listings</p>
               <p className="mt-2 break-all text-sm text-neutral-600">{directoryPreview.directory_url}</p>
+              {directoryPreview.intent && <p className="mt-2 text-sm text-neutral-600">Matching focus: <span className="font-medium">{directoryPreview.intent}</span></p>}
               <p className="mt-1 text-xs text-neutral-500">Extraction uses {directoryPreview.total_listings.toLocaleString()} credits, 1 per listing. Nothing is saved until you confirm.</p>
             </div>
             <div className="flex shrink-0 gap-2">
@@ -345,12 +358,9 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
                       </button>
                       <Globe size={16} className="text-neutral-400 shrink-0" />
                       <div className="min-w-0 flex-1">
-                        <span className="font-mono text-sm font-medium text-neutral-800 block truncate">
-                          {d.domain}
-                        </span>
-                        {d.name && (
-                          <span className="text-xs text-neutral-400 truncate block">{d.name}</span>
-                        )}
+                        <span className="block truncate text-sm font-medium text-neutral-800">{d.business_name || d.name || "Unnamed business"}</span>
+                        <span className="block truncate font-mono text-xs text-neutral-500">{d.domain}</span>
+                        <span className="mt-1 block text-xs text-neutral-500 line-clamp-2">{d.service_summary}</span>
                       </div>
                     </div>
                   ))}
@@ -461,9 +471,11 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
                                 <span className="font-mono text-sm text-neutral-800 block truncate">
                                   {res.domain}
                                 </span>
+                                {res.business_name && <span className="block truncate text-xs font-medium text-neutral-700">{res.business_name}</span>}
                                 {res.category && (
                                   <span className="text-xs text-neutral-400">{res.category}</span>
                                 )}
+                                {res.service_summary && <span className="mt-1 block text-xs text-neutral-500 line-clamp-2">{res.service_summary}</span>}
                               </div>
                             </div>
                           ))}
@@ -477,12 +489,6 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
           </div>
         )}
       </div>
-      <section className="mt-8 border-t border-neutral-200 pt-6">
-        <button onClick={() => setWebsiteHistoryOpen((open) => !open)} className="inline-flex items-center gap-2 px-4 py-2.5 border border-neutral-200 rounded-lg text-sm font-medium">
-          <Mail size={16} />{websiteHistoryOpen ? "Hide website scraper history" : "Website scraper history"}
-        </button>
-        {websiteHistoryOpen && <HistoryView sourceType="website" onSendCampaign={onSendCampaign} />}
-      </section>
     </div>
   );
 }

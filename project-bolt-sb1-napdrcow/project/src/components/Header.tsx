@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { Coins, Mail, Menu, X, LogOut, Search, Globe, Settings, Moon, Sun, Users, MapPin, FileText, UserRound, Info, Target, Wallet } from "lucide-react";
+import { Coins, Mail, Menu, X, LogOut, Search, Globe, Settings, Moon, Sun, Users, MapPin, FileText, UserRound, Info, Target, Download } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
+import { usePwaInstall } from "@/lib/use-pwa-install";
 
-export type View = "home" | "about" | "mission" | "services" | "how-it-works" | "credits" | "scrape" | "domains" | "lists" | "messages" | "smtp" | "maps" | "login" | "signup";
+export type View = "home" | "about" | "mission" | "services" | "how-it-works" | "credits" | "settings" | "reset-password" | "scrape" | "domains" | "lists" | "messages" | "smtp" | "maps" | "login" | "signup";
 
 interface HeaderProps {
   view: View;
@@ -12,10 +13,12 @@ interface HeaderProps {
 
 export function Header({ view, onNavigate }: HeaderProps) {
   const { user, signOut } = useAuth();
+  const { isInstalled, installApp } = usePwaInstall();
   const userId = user?.id;
   const [mobileOpen, setMobileOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
-  const [creditBalance, setCreditBalance] = useState<{ daily_remaining: number; purchased_credits: number; total_remaining: number; resets_at: string } | null>(null);
+  const [installHint, setInstallHint] = useState(false);
+  const [creditBalance, setCreditBalance] = useState<{ daily_remaining: number; purchased_credits: number; subscription_remaining: number; total_remaining: number; resets_at: string } | null>(null);
   const [blackTheme, setBlackTheme] = useState(
     () => localStorage.getItem("mailharvest-theme") === "black"
   );
@@ -32,14 +35,22 @@ export function Header({ view, onNavigate }: HeaderProps) {
     }
     let active = true;
     const loadCredits = async () => {
-      const { data } = await supabase.rpc("get_my_credit_balance");
-      const result = Array.isArray(data) ? data[0] : data;
-      if (active && result) setCreditBalance({
-        daily_remaining: Number(result.daily_remaining),
-        purchased_credits: Number(result.purchased_credits),
-        total_remaining: Number(result.total_remaining),
-        resets_at: result.resets_at,
-      });
+      const [balanceResult, subscriptionResult] = await Promise.all([
+        supabase.rpc("get_my_credit_balance"),
+        supabase.from("credit_subscriptions").select("credits_remaining")
+          .lte("starts_at", new Date().toISOString()).gt("expires_at", new Date().toISOString()),
+      ]);
+      const result = Array.isArray(balanceResult.data) ? balanceResult.data[0] : balanceResult.data;
+      if (active && result) {
+        const subscriptionRemaining = (subscriptionResult.data ?? []).reduce((total, item) => total + Number(item.credits_remaining), 0);
+        setCreditBalance({
+          daily_remaining: Number(result.daily_remaining),
+          purchased_credits: Number(result.purchased_credits),
+          subscription_remaining: subscriptionRemaining,
+          total_remaining: Number(result.total_remaining),
+          resets_at: result.resets_at,
+        });
+      }
     };
     void loadCredits();
     const onCreditsUpdated = () => void loadCredits();
@@ -62,6 +73,11 @@ export function Header({ view, onNavigate }: HeaderProps) {
       {blackTheme ? <Sun size={18} /> : <Moon size={18} />}
     </button>
   );
+
+  const handleInstall = async () => {
+    const result = await installApp();
+    setInstallHint(result === "unavailable");
+  };
 
   const navItem = (label: string, target: View, icon: React.ReactNode) => (
     <button
@@ -100,12 +116,13 @@ export function Header({ view, onNavigate }: HeaderProps) {
 
               {user ? (
                 <nav className="hidden xl:flex items-center gap-0.5 whitespace-nowrap">
+                  {navItem("Maps", "maps", <MapPin size={15} />)}
                   {navItem("Domain Scraping", "domains", <Globe size={15} />)}
                   {navItem("Email Scraping", "scrape", <Mail size={15} />)}
-                  {navItem("Maps", "maps", <MapPin size={15} />)}
                   {navItem("Email Lists", "lists", <Users size={15} />)}
                   {navItem("Messages", "messages", <FileText size={15} />)}
                   {navItem("SMTPs", "smtp", <Settings size={15} />)}
+                  {navItem("Credit Balance", "credits", <Coins size={15} />)}
                 </nav>
           ) : (
             <nav className="hidden md:flex items-center gap-1">
@@ -119,7 +136,7 @@ export function Header({ view, onNavigate }: HeaderProps) {
 
           <div className="hidden xl:flex items-center gap-3">
             {themeToggle}
-            {user && creditBalance && <button onClick={() => onNavigate("credits")} title={`${creditBalance.daily_remaining.toLocaleString()} daily + ${creditBalance.purchased_credits.toLocaleString()} purchased. Daily credits reset ${new Date(creditBalance.resets_at).toLocaleString()}.`} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 border border-neutral-200 rounded-lg text-xs font-medium text-neutral-600 hover:border-primary-300"><Coins size={15} className="text-primary-600" />{creditBalance.total_remaining.toLocaleString()} credits</button>}
+            {!isInstalled && <button onClick={() => void handleInstall()} className="inline-flex items-center gap-1.5 rounded-lg border border-neutral-200 px-3 py-2 text-sm font-medium text-neutral-700 hover:border-primary-300 hover:text-primary-700"><Download size={15} />Install App</button>}
             {!user && (
               <>
                 <button
@@ -152,12 +169,15 @@ export function Header({ view, onNavigate }: HeaderProps) {
               </button>
               {profileOpen && (
                 <div role="menu" className="absolute right-0 top-full mt-2 w-64 rounded-lg border border-neutral-200 bg-white p-3 shadow-lg">
-                  <p className="px-2 py-1 text-sm text-neutral-600 break-all">{user.email}</p>
-                  <button role="menuitem" onClick={() => { onNavigate("credits"); setProfileOpen(false); }} className="mt-2 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-neutral-600 hover:bg-neutral-100"><Wallet size={15} />Credit Balance</button>
-                  <button role="menuitem" onClick={() => { onNavigate("about"); setProfileOpen(false); }} className="mt-2 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-neutral-600 hover:bg-neutral-100"><Info size={15} />About Us</button>
-                  <button role="menuitem" onClick={() => { onNavigate("mission"); setProfileOpen(false); }} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-neutral-600 hover:bg-neutral-100"><Target size={15} />Our Mission</button>
-                  <button role="menuitem" onClick={() => { onNavigate("services"); setProfileOpen(false); }} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-neutral-600 hover:bg-neutral-100"><Globe size={15} />Our Services</button>
-                  <button role="menuitem" onClick={() => { onNavigate("how-it-works"); setProfileOpen(false); }} className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-neutral-600 hover:bg-neutral-100"><FileText size={15} />How It Works</button>
+                  <p className="px-2 py-1 text-sm font-medium text-neutral-800 truncate">{String(user.user_metadata?.username ?? "Account")}</p>
+                  <p className="px-2 py-1 text-xs text-neutral-500 break-all">{user.email}</p>
+                  <button
+                    role="menuitem"
+                    onClick={() => { onNavigate("settings"); setProfileOpen(false); setMobileOpen(false); }}
+                    className="mt-2 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm text-neutral-600 hover:bg-neutral-100"
+                  >
+                    <Settings size={16} />Settings
+                  </button>
                   <button
                     role="menuitem"
                     onClick={() => {
@@ -167,7 +187,7 @@ export function Header({ view, onNavigate }: HeaderProps) {
                     className="mt-2 flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm font-medium text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900"
                   >
                     <LogOut size={16} />
-                    Sign out
+                    Log out
                   </button>
                 </div>
               )}
@@ -188,17 +208,13 @@ export function Header({ view, onNavigate }: HeaderProps) {
         <div className="xl:hidden border-t border-neutral-200/60 bg-white px-4 py-3 space-y-1 animate-slide-in max-h-[calc(100vh-4rem)] overflow-y-auto">
           {user ? (
             <>
+              {navItem("Maps", "maps", <MapPin size={16} />)}
               {navItem("Domain Scraping", "domains", <Globe size={16} />)}
               {navItem("Email Scraping", "scrape", <Mail size={16} />)}
-              {navItem("Maps Scraper", "maps", <MapPin size={16} />)}
               {navItem("Email Lists", "lists", <Users size={16} />)}
               {navItem("Messages", "messages", <FileText size={16} />)}
               {navItem("SMTPs", "smtp", <Settings size={16} />)}
               {navItem("Credit Balance", "credits", <Coins size={16} />)}
-              {navItem("About Us", "about", <Info size={16} />)}
-              {navItem("Our Mission", "mission", <Target size={16} />)}
-              {navItem("Our Services", "services", <Globe size={16} />)}
-              {navItem("How It Works", "how-it-works", <FileText size={16} />)}
             </>
           ) : (
             <>
@@ -211,9 +227,11 @@ export function Header({ view, onNavigate }: HeaderProps) {
           )}
           <div className="px-3 py-1 flex items-center justify-between gap-3">
             {themeToggle}
-            {user && creditBalance && <span title={`${creditBalance.daily_remaining.toLocaleString()} daily + ${creditBalance.purchased_credits.toLocaleString()} purchased. Resets ${new Date(creditBalance.resets_at).toLocaleString()}.`} className="inline-flex items-center gap-1.5 text-xs font-medium text-neutral-600"><Coins size={14} className="text-primary-600" />{creditBalance.total_remaining.toLocaleString()} credits</span>}
+            {user && creditBalance && <span title={`${creditBalance.daily_remaining.toLocaleString()} daily + ${creditBalance.subscription_remaining.toLocaleString()} subscription + ${creditBalance.purchased_credits.toLocaleString()} purchased. Resets ${new Date(creditBalance.resets_at).toLocaleString()}.`} className="inline-flex items-center gap-1.5 text-xs font-medium text-neutral-600"><Coins size={14} className="text-primary-600" />{creditBalance.total_remaining.toLocaleString()} credits</span>}
           </div>
           <div className="pt-2 border-t border-neutral-100 flex flex-col gap-2">
+            {!isInstalled && <button onClick={() => void handleInstall()} className="flex items-center gap-2 rounded-lg border border-neutral-200 px-3 py-2 text-sm font-medium text-neutral-700"><Download size={16} />Install App</button>}
+            {installHint && <p role="status" className="px-3 text-xs text-neutral-500">Use your browser’s Install app or Add to Home Screen menu.</p>}
             {!user && (
               <>
                 <button
@@ -239,6 +257,7 @@ export function Header({ view, onNavigate }: HeaderProps) {
           </div>
         </div>
       )}
+      {installHint && !mobileOpen && <p role="status" className="border-t border-neutral-100 px-6 py-2 text-right text-xs text-neutral-500">Use your browser's Install app or Add to Home Screen menu.</p>}
     </header>
   );
 }
