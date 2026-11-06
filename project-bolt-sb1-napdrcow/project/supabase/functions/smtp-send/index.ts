@@ -264,7 +264,6 @@ Deno.serve(async (req: Request) => {
       : null;
 
     const createReplyTracking = async (item: DispatchCampaign, ownerId: string, messageId: string, recipient: string) => {
-      if (!replyTrackingDomain) return null;
       const token = crypto.randomUUID().replace(/-/g, "");
       const address = `reply+${token}@${replyTrackingDomain}`;
       const normalizedRecipient = recipient.trim().toLowerCase();
@@ -287,6 +286,11 @@ Deno.serve(async (req: Request) => {
 
     const processCampaign = async (item: DispatchCampaign) => {
       const ownerId = String(item.user_id);
+      if (!replyTrackingDomain) {
+        const message = "Reply tracking is not configured. Set REPLY_TRACKING_DOMAIN before dispatching campaigns.";
+        await supabase.from("campaign_queue").update({ status: "failed", error: message, dispatch_lock_until: null }).eq("id", item.id);
+        return { success: false, message };
+      }
       const config = await fetchConfig(item.smtp_config_id, ownerId);
       if (!config) {
         await supabase.from("campaign_queue").update({ status: "failed", error: "SMTP config not found", dispatch_lock_until: null }).eq("id", item.id);
@@ -342,7 +346,7 @@ Deno.serve(async (req: Request) => {
             replyTracking = await createReplyTracking(item, ownerId, message.id, recipient);
             await client.send({
               from: config.from_name ? `${config.from_name} <${config.from_email}>` : config.from_email,
-              ...(replyTracking ? { replyTo: replyTracking.address } : {}),
+              replyTo: replyTracking.address,
               to: recipient,
               subject: message.subject,
               content: message.format === "html" ? htmlToPlainText(message.body) : message.body,
@@ -501,6 +505,11 @@ Deno.serve(async (req: Request) => {
 
     // Queue all campaigns so the adaptive dispatcher regulates every recipient.
     if (action === "send") {
+      if (!replyTrackingDomain) {
+        return new Response(JSON.stringify({ error: "Reply tracking is not configured. Set REPLY_TRACKING_DOMAIN before dispatching campaigns." }), {
+          status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
       const config = await fetchConfig(body.config_id);
       if (!config) {
         return new Response(JSON.stringify({ error: "No active SMTP configuration found." }), {

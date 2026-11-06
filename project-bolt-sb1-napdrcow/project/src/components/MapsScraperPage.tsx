@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { ExternalLink, Globe, Loader2, MapPin, Search } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/lib/auth";
-import { scrapeDomains } from "@/lib/scrape";
+import { scrapeDomains, waitForScrapeRun } from "@/lib/scrape";
 import { HistoryView } from "@/components/HistoryView";
 import type { CompanyRecord, ScrapeCampaignBatch } from "@/lib/types";
 
@@ -73,13 +73,17 @@ export function MapsScraperPage({ onSendCampaign }: { onSendCampaign?: (batch: S
     setScrapeMessage("");
     try {
       const domain = new URL(place.website).hostname;
-      const result = await scrapeDomains([domain], session.access_token, {
+      const queued = await scrapeDomains([domain], session.access_token, {
         sourceType: "maps",
         sourceQuery: resultsQuery,
         batchLabel: `${resultsQuery}: ${place.name}`,
       });
+      const result = await waitForScrapeRun(queued.run_id, queued.total_domains, queued.source_type, () => undefined);
       const emails = result.results.flatMap((item) => item.emails);
-      setScrapeMessage(`${place.name}: ${emails.length} email${emails.length === 1 ? "" : "s"} found. Results were added to Email lists.`);
+      const failed = result.results.some((item) => item.status === "failed");
+      setScrapeMessage(failed && emails.length === 0
+        ? `${place.name}: the domain could not be processed. Check Email Scraping history for details.`
+        : `${place.name}: ${emails.length} email${emails.length === 1 ? "" : "s"} found. Results were added to Email lists.`);
     } catch (scrapeError) {
       setScrapeMessage(scrapeError instanceof Error ? scrapeError.message : "Could not scrape this website.");
     }

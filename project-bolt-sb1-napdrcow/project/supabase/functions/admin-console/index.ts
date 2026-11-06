@@ -54,6 +54,71 @@ Deno.serve(async (req: Request) => {
     if (!adminRole) return response({ error: "Administrator access is required." }, 403);
 
     const body = await req.json();
+    if (body.action === "update_wallet_funding_settings") {
+      const bankName = typeof body.bank_name === "string" ? body.bank_name.trim().slice(0, 100) : "";
+      const accountNumber = typeof body.account_number === "string" ? body.account_number.replace(/\s+/g, "").slice(0, 34) : "";
+      const accountName = typeof body.account_name === "string" ? body.account_name.trim().slice(0, 120) : "";
+      if (!bankName || !accountNumber || !accountName || !/^[0-9]{6,34}$/.test(accountNumber)) {
+        return response({ error: "Enter a bank name, valid account number, and account name." }, 400);
+      }
+      const { data: settings, error } = await supabase.from("wallet_funding_settings").upsert({
+        id: 1, bank_name: bankName, account_number: accountNumber, account_name: accountName,
+        updated_by: actorId, updated_at: new Date().toISOString(),
+      }).select("bank_name,account_number,account_name,updated_at").single();
+      if (error || !settings) return response({ error: "Could not save manual funding bank details." }, 500);
+      await supabase.from("admin_audit_log").insert({
+        actor_id: actorId,
+        action: "update_wallet_funding_settings",
+        details: { bank_name: bankName, account_number_last4: accountNumber.slice(-4) },
+      });
+      return response({ settings });
+    }
+
+    if (body.action === "manual_deposits") {
+      const { data: deposits, error } = await supabase.from("wallet_payments")
+        .select("reference,user_id,amount_minor,currency,credits,created_at,proof_path")
+        .eq("gateway", "manual").eq("status", "pending")
+        .order("created_at", { ascending: true }).limit(100);
+      if (error) return response({ error: "Could not load manual deposits." }, 500);
+      const results = await Promise.all((deposits ?? []).map(async (deposit) => {
+        const [{ data: authUser }, proofResult] = await Promise.all([
+          supabase.auth.admin.getUserById(deposit.user_id),
+          deposit.proof_path
+            ? supabase.storage.from("wallet-payment-proofs").createSignedUrl(deposit.proof_path, 600)
+            : Promise.resolve({ data: null, error: null }),
+        ]);
+        return {
+          ...deposit,
+          user_email: authUser.user?.email ?? "Unknown account",
+          proof_url: proofResult.data?.signedUrl ?? null,
+        };
+      }));
+      return response({ deposits: results });
+    }
+
+    if (body.action === "review_manual_deposit") {
+      const reference = typeof body.reference === "string" ? body.reference : "";
+      const decision = body.decision === "approve" || body.decision === "reject" ? body.decision : "";
+      const reviewNote = typeof body.review_note === "string" ? body.review_note.trim().slice(0, 500) : "";
+      if (!reference || !decision) return response({ error: "A payment reference and decision are required." }, 400);
+      const { error } = await supabase.rpc("review_manual_wallet_payment", {
+        p_reference: reference,
+        p_admin_user_id: actorId,
+        p_decision: decision,
+        p_review_note: reviewNote || null,
+      });
+      if (error) return response({ error: "Could not review this manual payment. It may already be resolved." }, 409);
+      const { data: payment } = await supabase.from("wallet_payments")
+        .select("user_id,credits").eq("reference", reference).maybeSingle();
+      await supabase.from("admin_audit_log").insert({
+        actor_id: actorId,
+        target_user_id: payment?.user_id ?? null,
+        action: decision === "approve" ? "approve_manual_wallet_deposit" : "reject_manual_wallet_deposit",
+        details: { reference, credits: payment?.credits ?? null, note: reviewNote || null },
+      });
+      return response({ success: true });
+    }
+
     if (body.action === "update_settings") {
       const { allow_signups, maintenance_mode, max_domains_per_run, daily_free_credits, web_search_enabled } = body.settings ?? {};
       if (typeof allow_signups !== "boolean" || typeof maintenance_mode !== "boolean" ||
@@ -197,13 +262,14 @@ Deno.serve(async (req: Request) => {
       if (error) throw error;
       return [table, count ?? 0] as const;
     }));
-    const [usersResult, runsResult, auditResult, settingsResult] = await Promise.all([
+    const [usersResult, runsResult, auditResult, settingsResult, walletFundingResult] = await Promise.all([
       supabase.auth.admin.listUsers({ page: 1, perPage: 100 }),
       supabase.from("scraping_runs").select("id,user_id,domain,status,total_emails,created_at").order("created_at", { ascending: false }).limit(20),
       supabase.from("admin_audit_log").select("id,actor_id,target_user_id,action,details,created_at").order("created_at", { ascending: false }).limit(20),
       supabase.from("system_settings").select("allow_signups,maintenance_mode,max_domains_per_run,daily_free_credits,web_search_enabled,updated_at").eq("id", 1).single(),
+      supabase.from("wallet_funding_settings").select("bank_name,account_number,account_name,updated_at").eq("id", 1).maybeSingle(),
     ]);
-    if (usersResult.error || runsResult.error || auditResult.error || settingsResult.error) throw new Error("Could not load admin overview.");
+    if (usersResult.error || runsResult.error || auditResult.error || settingsResult.error || walletFundingResult.error) throw new Error("Could not load admin overview.");
     const userIds = usersResult.data.users.map((user) => user.id);
     const now = new Date().toISOString();
     const [rolesResult, creditAccountsResult, subscriptionsResult] = userIds.length
@@ -239,6 +305,7 @@ Deno.serve(async (req: Request) => {
       recent_runs: runsResult.data,
       audit_log: auditResult.data,
       system_settings: settingsResult.data,
+      wallet_funding_settings: walletFundingResult.data,
       search_services: searchServices,
     });
   } catch (error) {

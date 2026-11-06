@@ -16,6 +16,12 @@ const JUNK_EMAILS = new Set([
   "your@email.com", "noreply@example.com",
 ]);
 
+const SERVICE_EMAIL_DOMAIN_SUFFIXES = [
+  "sentry.wixpress.com",
+  "sentry-next.wixpress.com",
+  "sentry.io",
+];
+
 const IMAGE_EXTENSIONS = [".png", ".jpg", ".gif", ".svg", ".webp", ".ico", ".bmp"];
 const IRRELEVANT_URL_SEGMENTS = new Set([
   "affiliate", "affiliates", "career", "careers", "cookie", "cookies", "job", "jobs",
@@ -30,11 +36,34 @@ const BUSINESS_CATEGORIES: Record<string, string[]> = {
   Manufacturing: ["manufacturing", "manufacturer", "factory", "industrial", "production", "machinery"],
   Technology: ["technology", "software", "digital", "cloud", "saas", "information technology"],
   Agriculture: ["agriculture", "agricultural", "farming", "farm", "crop", "livestock"],
+  "Food & Beverage": ["food", "beverage", "restaurant", "catering", "wine", "drink"],
+  "Fashion & Apparel": ["fashion", "apparel", "clothing", "textile", "garment", "footwear", "shoes"],
+  Automotive: ["automotive", "vehicle", "mobility", "transport", "car"],
+  Energy: ["energy", "solar", "wind", "renewable", "electric", "battery"],
+  Finance: ["finance", "bank", "insurance", "fintech", "payment"],
+  Logistics: ["logistics", "shipping", "freight", "cargo", "warehouse"],
+  "Real Estate": ["real estate", "property", "realtor", "housing"],
+  "Marketing & Media": ["marketing", "media", "advertising", "publishing", "broadcast"],
+  Chemicals: ["chemical", "chemicals", "plastic", "polymer", "coating"],
 };
 
 function categoryFromText(text: string): string {
-  const normalized = text.toLowerCase();
-  return Object.entries(BUSINESS_CATEGORIES).find(([, terms]) => terms.some((term) => normalized.includes(term)))?.[0] ?? "Other";
+  const normalized = ` ${text.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim()} `;
+  return Object.entries(BUSINESS_CATEGORIES).find(([, terms]) => terms.some((term) => {
+    const normalizedTerm = ` ${term.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim()} `;
+    return normalized.includes(normalizedTerm);
+  }))?.[0] ?? "Other";
+}
+
+function inferIndustryIntent(text: string): string {
+  const normalized = ` ${text.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim()} `;
+  return Object.entries(BUSINESS_CATEGORIES)
+    .filter(([, terms]) => terms.some((term) => {
+      const normalizedTerm = ` ${term.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim()} `;
+      return normalized.includes(normalizedTerm);
+    }))
+    .map(([category]) => category)
+    .join(" ");
 }
 
 function extractPageText(html: string): string {
@@ -74,18 +103,70 @@ function isIrrelevantPath(value: string): boolean {
 
 function isJunkEmail(email: string): boolean {
   const e = email.toLowerCase();
+  const domain = e.slice(e.lastIndexOf("@") + 1).replace(/\.$/, "");
   if (JUNK_EMAILS.has(e)) return true;
+  if (SERVICE_EMAIL_DOMAIN_SUFFIXES.some((suffix) => domain === suffix || domain.endsWith(`.${suffix}`))) return true;
   if (IMAGE_EXTENSIONS.some((ext) => e.endsWith(ext))) return true;
   if (e.startsWith("noreply@") || e.startsWith("no-reply@")) return true;
   if (e.startsWith("donotreply@")) return true;
   return false;
 }
 
-function normalizeDomain(input: string): string {
-  let d = input.trim().toLowerCase();
-  d = d.replace(/^https?:\/\//, "").replace(/^www\./, "");
-  d = d.split("/")[0];
-  return d;
+interface DomainTask {
+  input: string;
+  domain: string;
+  startUrl: string | null;
+  error: string | null;
+}
+
+interface ScrapeDomainJob {
+  id: string;
+  run_id: string;
+  user_id: string;
+  ordinal: number;
+  input: string;
+  domain: string;
+  start_url: string | null;
+  intent: string;
+  source_type: "website" | "maps";
+  status: string;
+  attempts: number;
+  error: string | null;
+}
+
+interface StoredScrapeResult {
+  job_id: string;
+  run_id: string;
+  user_id: string;
+  domain: string;
+  business_name: string;
+  service_summary: string;
+  category: string;
+  emails: string[];
+  status: string;
+  pages_scanned: number;
+  error: string | null;
+}
+
+function parseDomainTask(input: string): DomainTask {
+  const value = input.trim();
+  if (!value) return { input: value, domain: "", startUrl: null, error: "Enter a domain such as example.com." };
+
+  try {
+    const url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) {
+      return { input: value, domain: "", startUrl: null, error: "Only public HTTP or HTTPS websites are supported." };
+    }
+    const domain = url.hostname.toLowerCase().replace(/^www\./, "");
+    const labels = domain.split(".");
+    const validHostname = domain.length <= 253 && labels.length >= 2 && labels.every((label) =>
+      label.length >= 1 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label)
+    );
+    if (!validHostname) return { input: value, domain, startUrl: null, error: "This does not look like a valid public domain." };
+    return { input: value, domain, startUrl: url.toString(), error: null };
+  } catch {
+    return { input: value, domain: "", startUrl: null, error: "This does not look like a valid website URL or domain." };
+  }
 }
 
 async function fetchWithTimeout(url: string, timeoutMs = 6000, allowedDomain?: string): Promise<string | null> {
@@ -202,7 +283,7 @@ function extractEmailsFromHtml(html: string): string[] {
   return Array.from(found);
 }
 
-function extractLinks(html: string, baseDomain: string): string[] {
+function extractLinks(html: string, baseDomain: string, baseUrl = `https://${baseDomain}`): string[] {
   const links = new Set<string>();
   const linkRegex = /href=["']([^"']+)["']/gi;
   let match: RegExpExecArray | null;
@@ -214,7 +295,7 @@ function extractLinks(html: string, baseDomain: string): string[] {
     }
     let abs: string;
     try {
-      abs = new URL(href, `https://${baseDomain}`).toString();
+      abs = new URL(href, baseUrl).toString();
     } catch {
       continue;
     }
@@ -257,7 +338,7 @@ function prioritizeLinks(links: string[], intent = ""): string[] {
   return intentTerms.length > 0 ? priority.slice(0, 12) : [...priority.slice(0, 8), ...rest.slice(0, 4)];
 }
 
-async function scrapeDomain(domain: string, intent: string, source: "website" | "maps"): Promise<{
+async function scrapeDomain(domain: string, intent: string, source: "website" | "maps", startUrl?: string): Promise<{
   business_name: string;
   emails: string[];
   service_summary: string;
@@ -270,6 +351,7 @@ async function scrapeDomain(domain: string, intent: string, source: "website" | 
   let pagesScanned = 0;
 
   const candidates = [
+    ...(startUrl ? [startUrl] : []),
     `https://${domain}`,
     `https://www.${domain}`,
     `http://${domain}`,
@@ -277,9 +359,13 @@ async function scrapeDomain(domain: string, intent: string, source: "website" | 
   ];
 
   let homeHtml: string | null = null;
+  let homeUrl = `https://${domain}`;
   for (const c of candidates) {
     homeHtml = await fetchWithTimeout(c, 6000, domain);
-    if (homeHtml) break;
+    if (homeHtml) {
+      homeUrl = c;
+      break;
+    }
   }
 
   if (!homeHtml) {
@@ -294,7 +380,8 @@ async function scrapeDomain(domain: string, intent: string, source: "website" | 
     };
   }
   const metadata = companyMetadata(homeHtml, domain);
-  const [reviewedCompany] = await filterRelevantCompanies(intent, [{
+  const effectiveIntent = intent || inferIndustryIntent(`${domain} ${extractPageText(homeHtml).slice(0, 2000)} ${metadata.business_name} ${metadata.service_summary}`);
+  const [reviewedCompany] = await filterRelevantCompanies(effectiveIntent, [{
     ...metadata,
     domain,
     source,
@@ -318,13 +405,13 @@ async function scrapeDomain(domain: string, intent: string, source: "website" | 
   extractEmailsFromHtml(homeHtml).forEach((e) => allEmails.add(e));
 
   // Crawl sub-pages
-  const links = prioritizeLinks(extractLinks(homeHtml, domain), intent);
+  const links = prioritizeLinks(extractLinks(homeHtml, domain, homeUrl), effectiveIntent);
   for (const link of links) {
     if (allEmails.size >= 100) break;
     const html = await fetchWithTimeout(link, 6000, domain);
     pagesScanned += 1;
     if (html) {
-      const [relevantPage] = await filterRelevantCompanies(intent, [{
+      const [relevantPage] = await filterRelevantCompanies(effectiveIntent, [{
         ...verifiedMetadata,
         domain,
         source,
@@ -335,7 +422,7 @@ async function scrapeDomain(domain: string, intent: string, source: "website" | 
       extractEmailsFromHtml(html).forEach((e) => allEmails.add(e));
       // Also extract links from sub-pages and crawl one level deeper for contact pages
       if (allEmails.size < 20) {
-        const subLinks = prioritizeLinks(extractLinks(html, domain), intent)
+        const subLinks = prioritizeLinks(extractLinks(html, domain, link), effectiveIntent)
           .filter((l) => !links.includes(l))
           .slice(0, 3);
         for (const subLink of subLinks) {
@@ -343,7 +430,7 @@ async function scrapeDomain(domain: string, intent: string, source: "website" | 
           const subHtml = await fetchWithTimeout(subLink, 5000, domain);
           pagesScanned += 1;
           if (subHtml) {
-            const [relevantPage] = await filterRelevantCompanies(intent, [{
+            const [relevantPage] = await filterRelevantCompanies(effectiveIntent, [{
               ...verifiedMetadata,
               domain,
               source,
@@ -371,6 +458,115 @@ async function scrapeDomain(domain: string, intent: string, source: "website" | 
   return { ...verifiedMetadata, emails, pagesScanned, status: "completed", error: null };
 }
 
+async function finalizeScrapeRun(supabase: ReturnType<typeof createClient>, runId: string) {
+  const { data: jobs, error: jobsError } = await supabase.from("scrape_domain_jobs").select("status").eq("run_id", runId);
+  if (jobsError || !jobs) throw jobsError ?? new Error("Could not read scrape job states.");
+  const terminalStatuses = new Set(["completed", "no_emails", "not_relevant", "failed"]);
+  const allFinished = jobs.length > 0 && jobs.every((job) => terminalStatuses.has(job.status));
+  const { data: results, error: resultsError } = await supabase.from("scrape_results").select("emails,status").eq("run_id", runId);
+  if (resultsError || !results) throw resultsError ?? new Error("Could not read scrape results.");
+  const totalEmails = results.reduce((sum, result) => sum + (result.emails?.length ?? 0), 0);
+  const status = !allFinished ? "running" : jobs.every((job) => job.status === "failed") ? "failed" : "completed";
+  const { error: updateError } = await supabase.from("scraping_runs").update({ status, total_emails: totalEmails }).eq("id", runId);
+  if (updateError) throw updateError;
+  return { status, totalEmails, completed: jobs.filter((job) => terminalStatuses.has(job.status)).length, total: jobs.length };
+}
+
+async function processScrapeJob(supabase: ReturnType<typeof createClient>, job: ScrapeDomainJob) {
+  let result: StoredScrapeResult;
+  if (job.error) {
+    result = {
+      job_id: job.id,
+      run_id: job.run_id,
+      user_id: job.user_id,
+      domain: job.domain || job.input,
+      business_name: job.domain || job.input,
+      service_summary: "This entry could not be processed as a public website.",
+      category: "Other",
+      emails: [],
+      status: "failed",
+      pages_scanned: 0,
+      error: job.error,
+    };
+  } else {
+    try {
+      const scraped = await scrapeDomain(job.domain, job.intent || inferIndustryIntent(job.input), job.source_type, job.start_url ?? undefined);
+      result = {
+        job_id: job.id,
+        run_id: job.run_id,
+        user_id: job.user_id,
+        domain: job.domain,
+        business_name: scraped.business_name,
+        service_summary: scraped.service_summary,
+        category: scraped.category,
+        emails: scraped.emails,
+        status: scraped.status,
+        pages_scanned: scraped.pagesScanned,
+        error: scraped.error,
+      };
+    } catch (error) {
+      console.error(`Queued domain scrape failed for ${job.domain}:`, error instanceof Error ? error.message : "unknown error");
+      result = {
+        job_id: job.id,
+        run_id: job.run_id,
+        user_id: job.user_id,
+        domain: job.domain,
+        business_name: job.domain,
+        service_summary: "The website could not be processed.",
+        category: "Other",
+        emails: [],
+        status: "failed",
+        pages_scanned: 0,
+        error: "The site could not be reached or processed. Check the address and try again.",
+      };
+    }
+  }
+
+  const { data: stored, error: saveError } = await supabase.from("scrape_results")
+    .upsert(result, { onConflict: "job_id" })
+    .select("id")
+    .single();
+  if (saveError || !stored) throw saveError ?? new Error("Could not save this domain result.");
+
+  const { error: jobUpdateError } = await supabase.from("scrape_domain_jobs").update({
+    status: result.status,
+    result_id: stored.id,
+    error: result.error,
+    locked_until: null,
+    updated_at: new Date().toISOString(),
+  }).eq("id", job.id);
+  if (jobUpdateError) throw jobUpdateError;
+
+  if (result.emails.length > 0) {
+    const discoveredAt = new Date().toISOString();
+    const contacts = [...new Set(result.emails.map((email) => email.trim().toLowerCase()).filter(Boolean))].map((email) => ({
+      user_id: job.user_id,
+      email,
+      domain: job.domain,
+      source_run_id: job.run_id,
+      last_seen_at: discoveredAt,
+    }));
+    const { error: contactError } = await supabase.from("email_contacts").upsert(contacts, { onConflict: "user_id,email" });
+    if (contactError) console.error(`Could not index queued emails for ${job.domain}:`, contactError.message);
+  }
+
+  const runState = await finalizeScrapeRun(supabase, job.run_id);
+  return { result, run: runState };
+}
+
+async function kickScrapeWorker(supabaseUrl: string, dispatcherSecret: string) {
+  try {
+    const response = await fetch(`${supabaseUrl}/functions/v1/scrape-emails`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Scrape-Dispatcher-Secret": dispatcherSecret },
+      body: JSON.stringify({ action: "dispatch_due" }),
+    });
+    if (!response.ok) console.error("Could not kick scrape worker:", response.status);
+  } catch (error) {
+    console.error("Could not kick scrape worker:", error instanceof Error ? error.message : "unknown error");
+  }
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 200, headers: corsHeaders });
@@ -380,6 +576,33 @@ Deno.serve(async (req: Request) => {
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const serviceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(supabaseUrl, serviceKey);
+    const body = await req.json();
+
+    if (body.action === "dispatch_due") {
+      const dispatcherSecret = Deno.env.get("SCRAPE_DISPATCHER_SECRET");
+      if (!dispatcherSecret || req.headers.get("x-scrape-dispatcher-secret") !== dispatcherSecret) {
+        return new Response(JSON.stringify({ error: "Dispatcher access is required." }), {
+          status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      const { data: settings } = await supabase.from("system_settings").select("maintenance_mode").eq("id", 1).maybeSingle();
+      if (settings?.maintenance_mode) return new Response(JSON.stringify({ success: true, paused: true }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+
+      const { data: jobs, error: claimError } = await supabase.rpc("claim_due_scrape_domain_jobs", { p_limit: 1 });
+      if (claimError) {
+        console.error("Could not claim a scrape job:", claimError.message);
+        return new Response(JSON.stringify({ error: "Could not claim a queued domain." }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+      const job = (jobs as ScrapeDomainJob[] | null)?.[0];
+      if (!job) return new Response(JSON.stringify({ success: true, processed: 0 }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+
+      const processed = await processScrapeJob(supabase, job);
+      const nextSecret = Deno.env.get("SCRAPE_DISPATCHER_SECRET");
+      if (nextSecret) EdgeRuntime.waitUntil(kickScrapeWorker(supabaseUrl, nextSecret));
+      return new Response(JSON.stringify({ success: true, processed: 1, job_id: job.id, status: processed.result.status, run: processed.run }), {
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) {
@@ -406,55 +629,108 @@ Deno.serve(async (req: Request) => {
       return new Response(JSON.stringify({ error: "The system is in maintenance mode." }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
     }
 
-    const body = await req.json();
-    const rawDomains: string[] = Array.isArray(body.domains)
+    if (body.action === "enqueue") {
+      const rawDomains: unknown[] = Array.isArray(body.domains) ? body.domains : [body.domain];
+      const uniqueTasks = new Map<string, DomainTask>();
+      for (const rawTarget of rawDomains) {
+        const task = parseDomainTask(typeof rawTarget === "string" ? rawTarget : String(rawTarget ?? ""));
+        if (!task.input) continue;
+        const key = task.error ? task.input.toLowerCase() : task.domain;
+        if (!uniqueTasks.has(key)) uniqueTasks.set(key, task);
+      }
+      const tasks = Array.from(uniqueTasks.values());
+      if (tasks.length === 0) {
+        return new Response(JSON.stringify({ error: "Enter at least one domain or website URL." }), { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+
+      const sourceType = body.source_type === "maps" ? "maps" : "website";
+      const sourceQuery = typeof body.source_query === "string" ? body.source_query.trim().slice(0, 200) : "";
+      const intent = typeof body.intent === "string" ? body.intent.trim().slice(0, 200) : "";
+      const batchLabel = typeof body.batch_label === "string" ? body.batch_label.trim().slice(0, 120) : "";
+      const { data: queued, error: enqueueError } = await supabase.rpc("enqueue_scrape_batch", {
+        p_user_id: userId,
+        p_source_type: sourceType,
+        p_source_query: sourceQuery || null,
+        p_batch_label: batchLabel || null,
+        p_intent: intent,
+        p_tasks: tasks.map((task) => ({
+          input: task.input,
+          domain: task.domain,
+          start_url: task.startUrl,
+          error: task.error,
+        })),
+      });
+      if (enqueueError || !queued) {
+        const message = enqueueError?.message ?? "Could not add domains to the scrape queue.";
+        const status = /not enough credits/i.test(message) ? 402 : 503;
+        return new Response(JSON.stringify({ error: message }), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+      const dispatcherSecret = Deno.env.get("SCRAPE_DISPATCHER_SECRET");
+      if (dispatcherSecret) EdgeRuntime.waitUntil(kickScrapeWorker(supabaseUrl, dispatcherSecret));
+      return new Response(JSON.stringify({
+        run_id: queued.run_id,
+        queued: true,
+        total_domains: queued.total_domains,
+        valid_domains: queued.valid_domains,
+        credits_remaining: queued.credits_remaining,
+        source_type: sourceType,
+      }), { status: 202, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    const rawDomains: unknown[] = Array.isArray(body.domains)
       ? body.domains
       : [body.domain];
-    const domains = Array.from(
-      new Set(
-        rawDomains
-          .map(normalizeDomain)
-          .filter((d) => d.length > 0 && d.includes("."))
-      )
-    ) as string[];
+    const uniqueTasks = new Map<string, DomainTask>();
+    for (const rawTarget of rawDomains) {
+      const task = parseDomainTask(typeof rawTarget === "string" ? rawTarget : String(rawTarget ?? ""));
+      if (!task.input) continue;
+      const key = task.error ? task.input.toLowerCase() : task.domain;
+      if (!uniqueTasks.has(key)) uniqueTasks.set(key, task);
+    }
+    const tasks = Array.from(uniqueTasks.values());
 
-    if (domains.length === 0) {
+    if (tasks.length === 0) {
       return new Response(JSON.stringify({ error: "No valid domains provided. Please enter a domain like example.com" }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
     const maxDomains = Math.min(5, systemSettings.max_domains_per_run);
-    if (domains.length > maxDomains) {
+    if (tasks.length > maxDomains) {
       return new Response(JSON.stringify({ error: `This request exceeds the current limit of ${maxDomains} domains.` }), {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    const domainsToProcess = domains;
+    const validTasks = tasks.filter((task) => !task.error);
+    const domainsToProcess = validTasks.map((task) => task.domain);
+    let creditsRemaining: number | null = null;
 
-    const { data: creditData, error: creditError } = await supabase.rpc("consume_user_credits", {
-      p_user_id: userId,
-      p_amount: domainsToProcess.length,
-      p_reason: "email_domain_scrape",
-    });
-    const creditResult = Array.isArray(creditData) ? creditData[0] : creditData;
-    if (creditError || !creditResult) {
-      return new Response(JSON.stringify({ error: "Could not verify credit balance." }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
-    }
-    if (!creditResult.allowed) {
-      return new Response(JSON.stringify({
-        error: `Not enough credits. This scrape needs ${domainsToProcess.length} credits; ${creditResult.total_remaining} remain.`,
-        credits_remaining: creditResult.total_remaining,
-      }), { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    if (validTasks.length > 0) {
+      const { data: creditData, error: creditError } = await supabase.rpc("consume_user_credits", {
+        p_user_id: userId,
+        p_amount: validTasks.length,
+        p_reason: "email_domain_scrape",
+      });
+      const creditResult = Array.isArray(creditData) ? creditData[0] : creditData;
+      if (creditError || !creditResult) {
+        return new Response(JSON.stringify({ error: "Could not verify credit balance." }), { status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
+      creditsRemaining = Number(creditResult.total_remaining);
+      if (!creditResult.allowed) {
+        return new Response(JSON.stringify({
+          error: `Not enough credits. This scrape needs ${validTasks.length} credits; ${creditResult.total_remaining} remain.`,
+          credits_remaining: creditResult.total_remaining,
+        }), { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
     }
 
-    const isBulk = domainsToProcess.length > 1;
-    const primaryDomain = domainsToProcess[0];
+    const isBulk = tasks.length > 1;
+    const primaryDomain = tasks[0].domain || tasks[0].input;
     const sourceType = body.source_type === "maps" ? "maps" : "website";
     const sourceQuery = typeof body.source_query === "string"
       ? body.source_query.trim().slice(0, 200) || null
       : null;
-    const intent = typeof body.intent === "string" && body.intent.trim()
+    const requestedIntent = typeof body.intent === "string" && body.intent.trim()
       ? body.intent.trim().slice(0, 200)
       : sourceQuery ?? "";
     const requestedLabel = typeof body.batch_label === "string"
@@ -483,7 +759,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const runId = run.id;
-    const results: Array<{
+    type DomainResult = {
       domain: string;
       business_name: string;
       service_summary: string;
@@ -493,78 +769,158 @@ Deno.serve(async (req: Request) => {
       status: string;
       pages_scanned: number;
       error: string | null;
-    }> = [];
+    };
 
-    for (const domain of domainsToProcess) {
-      const r = await scrapeDomain(domain, intent, sourceType);
-      results.push({
-        domain,
-        business_name: r.business_name,
-        service_summary: r.service_summary,
-        category: r.category,
-        source: sourceType,
-        emails: r.emails,
-        status: r.status,
-        pages_scanned: r.pagesScanned,
-        error: r.error,
-      });
-      await supabase.from("scrape_results").insert({
-        run_id: runId,
-        user_id: userId,
-        domain,
-        business_name: r.business_name,
-        service_summary: r.service_summary,
-        category: r.category,
-        emails: r.emails,
-        status: r.status,
-        pages_scanned: r.pagesScanned,
-        error: r.error,
-      });
-    }
+    const processBatch = async (emit: (event: Record<string, unknown>) => Promise<void>) => {
+      const results: DomainResult[] = [];
+      for (let index = 0; index < tasks.length; index += 1) {
+        const task = tasks[index];
+        const domain = task.domain || task.input;
+        await emit({ type: "progress", current: index + 1, completed: index, total: tasks.length, domain, phase: "processing" });
 
-    const discoveredAt = new Date().toISOString();
-    const uniqueContacts = new Map<string, { user_id: string; email: string; domain: string; source_run_id: string; last_seen_at: string }>();
-    for (const result of results) {
-      for (const rawEmail of result.emails) {
-        const email = rawEmail.trim().toLowerCase();
-        if (!email) continue;
-        uniqueContacts.set(email, {
-          user_id: userId,
-          email,
-          domain: result.domain,
-          source_run_id: runId,
-          last_seen_at: discoveredAt,
-        });
+        let result: DomainResult;
+        if (task.error) {
+          result = {
+            domain,
+            business_name: domain,
+            service_summary: "This entry could not be processed as a public website.",
+            category: "Other",
+            source: sourceType,
+            emails: [],
+            status: "failed",
+            pages_scanned: 0,
+            error: task.error,
+          };
+        } else {
+          try {
+            const intent = requestedIntent || inferIndustryIntent(task.input);
+            const scraped = await scrapeDomain(task.domain, intent, sourceType, task.startUrl ?? undefined);
+            result = {
+              domain: task.domain,
+              business_name: scraped.business_name,
+              service_summary: scraped.service_summary,
+              category: scraped.category,
+              source: sourceType,
+              emails: scraped.emails,
+              status: scraped.status,
+              pages_scanned: scraped.pagesScanned,
+              error: scraped.error,
+            };
+          } catch (error) {
+            console.error(`Domain scrape failed for ${task.domain}:`, error instanceof Error ? error.message : "unknown error");
+            result = {
+              domain: task.domain,
+              business_name: task.domain,
+              service_summary: "The website could not be processed.",
+              category: "Other",
+              source: sourceType,
+              emails: [],
+              status: "failed",
+              pages_scanned: 0,
+              error: "The site could not be reached or processed. Check the address and try again.",
+            };
+          }
+        }
+
+        try {
+          const { error: resultError } = await supabase.from("scrape_results").insert({
+            run_id: runId,
+            user_id: userId,
+            domain: result.domain,
+            business_name: result.business_name,
+            service_summary: result.service_summary,
+            category: result.category,
+            emails: result.emails,
+            status: result.status,
+            pages_scanned: result.pages_scanned,
+            error: result.error,
+          });
+          if (resultError) throw resultError;
+        } catch (error) {
+          console.error(`Could not save scrape result for ${domain}:`, error instanceof Error ? error.message : "unknown error");
+          result.status = "failed";
+          result.error = "The domain was processed, but its result could not be saved to history.";
+        }
+
+        await emit({ type: "result", result });
+        results.push(result);
+        await emit({ type: "progress", current: index + 1, completed: index + 1, total: tasks.length, domain, phase: "completed" });
       }
-    }
-    if (uniqueContacts.size > 0) {
-      const { error: contactIndexError } = await supabase
-        .from("email_contacts")
-        .upsert([...uniqueContacts.values()], { onConflict: "user_id,email" });
-      if (contactIndexError) {
-        console.error("Could not update the normalized email directory:", contactIndexError.message);
+
+      const discoveredAt = new Date().toISOString();
+      const uniqueContacts = new Map<string, { user_id: string; email: string; domain: string; source_run_id: string; last_seen_at: string }>();
+      for (const result of results) {
+        for (const rawEmail of result.emails) {
+          const email = rawEmail.trim().toLowerCase();
+          if (!email) continue;
+          uniqueContacts.set(email, {
+            user_id: userId,
+            email,
+            domain: result.domain,
+            source_run_id: runId,
+            last_seen_at: discoveredAt,
+          });
+        }
       }
-    }
+      if (uniqueContacts.size > 0) {
+        try {
+          const { error: contactIndexError } = await supabase
+            .from("email_contacts")
+            .upsert([...uniqueContacts.values()], { onConflict: "user_id,email" });
+          if (contactIndexError) throw contactIndexError;
+        } catch (error) {
+          console.error("Could not update the normalized email directory:", error instanceof Error ? error.message : "unknown error");
+        }
+      }
 
-    const totalEmails = results.reduce((sum, r) => sum + r.emails.length, 0);
-    const anyFailed = results.some((r) => r.status === "failed");
-    const overallStatus = anyFailed && totalEmails === 0 ? "failed" : "completed";
+      const totalEmails = results.reduce((sum, result) => sum + result.emails.length, 0);
+      const overallStatus = results.every((result) => result.status === "failed") ? "failed" : "completed";
+      try {
+        const { error: runUpdateError } = await supabase.from("scraping_runs")
+          .update({ status: overallStatus, total_emails: totalEmails }).eq("id", runId);
+        if (runUpdateError) throw runUpdateError;
+      } catch (error) {
+        console.error("Could not finalize scrape history:", error instanceof Error ? error.message : "unknown error");
+      }
 
-    await supabase
-      .from("scraping_runs")
-      .update({ status: overallStatus, total_emails: totalEmails })
-      .eq("id", runId);
-
-    return new Response(
-      JSON.stringify({
+      return {
         run_id: runId,
         total_emails: totalEmails,
-        domains_scraped: domainsToProcess.length,
-        credits_remaining: creditResult.total_remaining,
+        domains_scraped: tasks.length,
+        credits_remaining: creditsRemaining,
         results,
-      }),
-      { headers: { ...corsHeaders, "Content-Type": "application/json" } }
-    );
+      };
+    };
+
+    if (body.stream === true) {
+      const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>();
+      const writer = writable.getWriter();
+      const encoder = new TextEncoder();
+      let writeQueue = Promise.resolve();
+      const emit = (event: Record<string, unknown>) => {
+        writeQueue = writeQueue.then(() => writer.write(encoder.encode(`${JSON.stringify(event)}\n`))).catch(() => undefined);
+        return writeQueue;
+      };
+      void (async () => {
+        try {
+          const payload = await processBatch(emit);
+          await emit({ type: "complete", ...payload });
+        } catch (error) {
+          await emit({ type: "error", error: error instanceof Error ? error.message : "The batch could not be completed." });
+        } finally {
+          await writeQueue;
+          try { await writer.close(); } catch { /* client may have disconnected */ }
+        }
+      })();
+      return new Response(readable, {
+        headers: { ...corsHeaders, "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-cache" },
+      });
+    }
+
+    const payload = await processBatch(async () => undefined);
+    return new Response(JSON.stringify(payload), {
+      headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
   } catch (err) {
     return new Response(
       JSON.stringify({ error: err instanceof Error ? err.message : "An unexpected error occurred during scraping." }),

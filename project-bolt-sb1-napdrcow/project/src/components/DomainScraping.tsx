@@ -38,14 +38,13 @@ interface ParsedDomain {
 
 interface DomainScrapingProps {
   onNavigate: (v: View) => void;
-  onSendToScraper: (domains: string[]) => void;
+  onSendToScraper: (domains: string[], intent?: string) => void;
   onSendCampaign?: (batch: ScrapeCampaignBatch) => void;
 }
 
 export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapingProps) {
   const { session } = useAuth();
   const [url, setUrl] = useState("");
-  const [businessFocus, setBusinessFocus] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingAction, setLoadingAction] = useState<"preview" | "extract">("preview");
   const [error, setError] = useState<string | null>(null);
@@ -121,7 +120,7 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
     setSelected(new Set());
 
     try {
-      const data = await previewDomainDirectory(url, session!.access_token, businessFocus);
+      const data = await previewDomainDirectory(url, session!.access_token);
       setDirectoryPreview(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not locate a directory on this site.");
@@ -137,7 +136,7 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
     setLoadingAction("extract");
 
     try {
-      const data = await extractDomainDirectory(url, directoryPreview.directory_url, session!.access_token, businessFocus);
+      const data = await extractDomainDirectory(url, directoryPreview.directory_url, session!.access_token);
       setParseResult(data);
       setSelected(new Set(data.domains.map((d) => d.domain)));
       setDirectoryPreview(null);
@@ -171,7 +170,7 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
   const sendSelected = () => {
     const domains = Array.from(selected);
     if (domains.length === 0) return;
-    onSendToScraper(domains);
+    onSendToScraper(domains, parseResult?.intent);
   };
 
   const formatDate = (iso: string) => {
@@ -221,10 +220,6 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
 
       {/* URL Input */}
       <div className="bg-white rounded-2xl border border-neutral-200 p-6 mb-6">
-        <label className="mb-4 block text-sm font-medium text-neutral-700">
-          Business focus <span className="font-normal text-neutral-400">(optional)</span>
-          <input value={businessFocus} onChange={(event) => setBusinessFocus(event.target.value)} maxLength={200} placeholder="e.g. construction companies or educational institutes" className="mt-1.5 w-full px-3 py-2.5 rounded-lg border border-neutral-200 focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none text-sm" />
-        </label>
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <label className="text-sm font-medium text-neutral-700">Website domain or directory URL</label>
           <button onClick={() => setWebsiteHistoryOpen((open) => !open)} className="inline-flex items-center gap-2 px-3 py-1.5 border border-neutral-200 bg-white rounded-lg text-xs font-medium">
@@ -273,7 +268,7 @@ export function DomainScraping({ onSendToScraper, onSendCampaign }: DomainScrapi
               <p className="text-sm font-semibold text-neutral-800">Directory found</p>
               <p className="mt-1 text-2xl font-bold text-primary-700">{directoryPreview.total_listings.toLocaleString()} listings</p>
               <p className="mt-2 break-all text-sm text-neutral-600">{directoryPreview.directory_url}</p>
-              {directoryPreview.intent && <p className="mt-2 text-sm text-neutral-600">Matching focus: <span className="font-medium">{directoryPreview.intent}</span></p>}
+              {directoryPreview.intent && <p className="mt-2 text-sm text-neutral-600">Detected topic: <span className="font-medium">{directoryPreview.intent}</span></p>}
               <p className="mt-1 text-xs text-neutral-500">Extraction uses {directoryPreview.total_listings.toLocaleString()} credits, 1 per listing. Nothing is saved until you confirm.</p>
             </div>
             <div className="flex shrink-0 gap-2">

@@ -15,10 +15,28 @@ interface AdminUser {
 interface Overview {
   counts: Record<string, number>;
   system_settings: GlobalSettings;
+  wallet_funding_settings: WalletFundingSettings | null;
   search_services: SearchServices;
   users: AdminUser[];
   recent_runs: Array<{ id: string; user_id: string; domain: string; status: string; total_emails: number; created_at: string }>;
   audit_log: Array<{ id: string; actor_id: string | null; target_user_id: string | null; action: string; created_at: string }>;
+}
+
+interface WalletFundingSettings {
+  bank_name: string;
+  account_number: string;
+  account_name: string;
+}
+
+interface ManualDeposit {
+  reference: string;
+  user_id: string;
+  user_email: string;
+  amount_minor: number;
+  currency: string;
+  credits: number;
+  created_at: string;
+  proof_url: string | null;
 }
 
 interface SearchServices {
@@ -73,6 +91,11 @@ export function AdminDashboard({ onUnauthorized }: { onUnauthorized: () => void 
   const [checkingRole, setCheckingRole] = useState(true);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [settingsDraft, setSettingsDraft] = useState<GlobalSettings | null>(null);
+  const [walletFundingDraft, setWalletFundingDraft] = useState<WalletFundingSettings>({ bank_name: "", account_number: "", account_name: "" });
+  const [manualDeposits, setManualDeposits] = useState<ManualDeposit[]>([]);
+  const [loadingDeposits, setLoadingDeposits] = useState(false);
+  const [reviewingReference, setReviewingReference] = useState("");
+  const [savingWalletSettings, setSavingWalletSettings] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [searchKeyDraft, setSearchKeyDraft] = useState<Record<SearchKeyName, string>>({ google_maps_api_key: "", google_cse_api_key: "", google_cse_id: "" });
   const [clearSearchKey, setClearSearchKey] = useState<Record<SearchKeyName, boolean>>({ google_maps_api_key: false, google_cse_api_key: false, google_cse_id: false });
@@ -100,6 +123,17 @@ export function AdminDashboard({ onUnauthorized }: { onUnauthorized: () => void 
     setOverview(data as Overview);
   };
 
+  const loadManualDeposits = async () => {
+    setLoadingDeposits(true);
+    const { data, error: invokeError } = await supabase.functions.invoke("admin-console", { body: { action: "manual_deposits" } });
+    setLoadingDeposits(false);
+    if (invokeError || data?.error) {
+      setError(data?.error ?? invokeError?.message ?? "Could not load manual deposits.");
+      return;
+    }
+    setManualDeposits((data.deposits as ManualDeposit[]) ?? []);
+  };
+
   useEffect(() => {
     let active = true;
     const checkRole = async () => {
@@ -108,7 +142,10 @@ export function AdminDashboard({ onUnauthorized }: { onUnauthorized: () => void 
       if (!active) return;
       setAuthorized(Boolean(data));
       setCheckingRole(false);
-      if (data) void loadOverview();
+      if (data) {
+        void loadOverview();
+        void loadManualDeposits();
+      }
       else onUnauthorized();
     };
     void checkRole();
@@ -118,7 +155,10 @@ export function AdminDashboard({ onUnauthorized }: { onUnauthorized: () => void 
   const filteredUsers = useMemo(() => overview?.users.filter((item) => item.email?.toLowerCase().includes(query.trim().toLowerCase())) ?? [], [overview, query]);
 
   useEffect(() => {
-    if (overview) setSettingsDraft(overview.system_settings);
+    if (overview) {
+      setSettingsDraft(overview.system_settings);
+      setWalletFundingDraft(overview.wallet_funding_settings ?? { bank_name: "", account_number: "", account_name: "" });
+    }
   }, [overview]);
 
   const loadContacts = useCallback(async () => {
@@ -175,6 +215,40 @@ export function AdminDashboard({ onUnauthorized }: { onUnauthorized: () => void 
     }
     setSettingsDraft(data.settings as GlobalSettings);
     window.dispatchEvent(new Event("system-settings-updated"));
+    await loadOverview();
+  };
+
+  const saveWalletFundingSettings = async () => {
+    setSavingWalletSettings(true);
+    setError("");
+    const { data, error: invokeError } = await supabase.functions.invoke("admin-console", {
+      body: { action: "update_wallet_funding_settings", ...walletFundingDraft },
+    });
+    setSavingWalletSettings(false);
+    if (invokeError || data?.error) {
+      setError(data?.error ?? invokeError?.message ?? "Could not save bank details.");
+      return;
+    }
+    setWalletFundingDraft(data.settings as WalletFundingSettings);
+    setNotice("Manual funding bank details saved.");
+    await loadOverview();
+  };
+
+  const reviewManualDeposit = async (deposit: ManualDeposit, decision: "approve" | "reject") => {
+    const actionLabel = decision === "approve" ? "approve and credit" : "reject";
+    if (!window.confirm(`Are you sure you want to ${actionLabel} this ${deposit.credits.toLocaleString()} credit deposit?`)) return;
+    setReviewingReference(deposit.reference);
+    setError("");
+    const { data, error: invokeError } = await supabase.functions.invoke("admin-console", {
+      body: { action: "review_manual_deposit", reference: deposit.reference, decision },
+    });
+    setReviewingReference("");
+    if (invokeError || data?.error) {
+      setError(data?.error ?? invokeError?.message ?? "Could not review this deposit.");
+      return;
+    }
+    setNotice(decision === "approve" ? `Approved ${deposit.credits.toLocaleString()} credits for ${deposit.user_email}.` : "Manual deposit rejected.");
+    await loadManualDeposits();
     await loadOverview();
   };
 
@@ -248,6 +322,22 @@ export function AdminDashboard({ onUnauthorized }: { onUnauthorized: () => void 
               </button>
             </div>
           </div>}
+        </section>
+        <section className="mb-6 border border-neutral-200 bg-white rounded-lg">
+          <header className="p-5 border-b border-neutral-200"><h2 className="font-semibold">Manual wallet funding</h2><p className="mt-1 text-sm text-neutral-500">Bank details are shown to signed-in users who choose manual transfer.</p></header>
+          <div className="grid gap-4 p-5 md:grid-cols-3">
+            <label className="text-sm font-medium">Bank name<input value={walletFundingDraft.bank_name} onChange={(event) => setWalletFundingDraft({ ...walletFundingDraft, bank_name: event.target.value })} maxLength={100} className="mt-1.5 w-full rounded-lg border border-neutral-200 px-3 py-2.5 font-normal" /></label>
+            <label className="text-sm font-medium">Account number<input inputMode="numeric" value={walletFundingDraft.account_number} onChange={(event) => setWalletFundingDraft({ ...walletFundingDraft, account_number: event.target.value })} maxLength={34} className="mt-1.5 w-full rounded-lg border border-neutral-200 px-3 py-2.5 font-mono font-normal" /></label>
+            <label className="text-sm font-medium">Account name<input value={walletFundingDraft.account_name} onChange={(event) => setWalletFundingDraft({ ...walletFundingDraft, account_name: event.target.value })} maxLength={120} className="mt-1.5 w-full rounded-lg border border-neutral-200 px-3 py-2.5 font-normal" /></label>
+            <div className="md:col-span-3"><button onClick={() => void saveWalletFundingSettings()} disabled={savingWalletSettings} className="inline-flex items-center gap-2 rounded-lg bg-primary-600 px-4 py-2 text-sm font-medium text-white disabled:opacity-50">{savingWalletSettings ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}Save bank details</button></div>
+          </div>
+        </section>
+        <section className="mb-6 overflow-hidden rounded-lg border border-neutral-200 bg-white">
+          <header className="flex items-center justify-between gap-3 border-b border-neutral-200 p-5"><div><h2 className="font-semibold">Manual deposit review</h2><p className="mt-1 text-sm text-neutral-500">Approving a deposit immediately adds its purchased credits.</p></div><button onClick={() => void loadManualDeposits()} disabled={loadingDeposits} aria-label="Refresh manual deposits" title="Refresh deposits" className="rounded-lg border border-neutral-200 p-2 disabled:opacity-50">{loadingDeposits ? <Loader2 className="animate-spin" size={17} /> : <RefreshCw size={17} />}</button></header>
+          {loadingDeposits ? <p className="p-6 text-sm text-neutral-500">Loading deposits…</p> : manualDeposits.length === 0 ? <p className="p-6 text-sm text-neutral-500">No deposits are waiting for review.</p> : <div className="divide-y divide-neutral-100">{manualDeposits.map((deposit) => <article key={deposit.reference} className="flex flex-wrap items-center justify-between gap-4 p-5">
+            <div className="min-w-0"><p className="text-sm font-medium">{deposit.user_email}</p><p className="mt-1 font-mono text-xs text-neutral-500">{deposit.reference}</p><p className="mt-1 text-xs text-neutral-500">{deposit.currency} {(deposit.amount_minor / 100).toLocaleString()} · {deposit.credits.toLocaleString()} credits · {new Date(deposit.created_at).toLocaleString()}</p></div>
+            <div className="flex items-center gap-2">{deposit.proof_url && <a href={deposit.proof_url} target="_blank" rel="noreferrer" className="rounded-lg border border-neutral-200 px-3 py-2 text-sm font-medium">View proof</a>}<button onClick={() => void reviewManualDeposit(deposit, "reject")} disabled={reviewingReference === deposit.reference} className="rounded-lg border border-neutral-200 px-3 py-2 text-sm font-medium text-red-700 disabled:opacity-50">Reject</button><button onClick={() => void reviewManualDeposit(deposit, "approve")} disabled={reviewingReference === deposit.reference} className="rounded-lg bg-green-700 px-3 py-2 text-sm font-medium text-white disabled:opacity-50">{reviewingReference === deposit.reference ? "Reviewing…" : "Approve"}</button></div>
+          </article>)}</div>}
         </section>
         <section className="mb-6 border border-neutral-200 bg-white rounded-lg">
           <header className="p-5 border-b border-neutral-200"><h2 className="font-semibold">Search provider API keys</h2><p className="mt-1 text-sm text-neutral-500">Credentials are saved server-side and never returned to this page.</p></header>

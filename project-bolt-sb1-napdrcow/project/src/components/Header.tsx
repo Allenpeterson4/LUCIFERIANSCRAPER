@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
-import { Coins, Mail, Menu, X, LogOut, Search, Globe, Settings, Moon, Sun, Users, MapPin, FileText, UserRound, Info, Target, Download } from "lucide-react";
+import { Coins, Menu, X, LogOut, Settings, Moon, Sun, UserRound, Download } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { supabase } from "@/lib/supabase";
 import { usePwaInstall } from "@/lib/use-pwa-install";
 
-export type View = "home" | "about" | "mission" | "services" | "how-it-works" | "credits" | "settings" | "reset-password" | "scrape" | "domains" | "lists" | "messages" | "smtp" | "maps" | "login" | "signup";
+export type View = "home" | "about" | "mission" | "services" | "how-it-works" | "credits" | "settings" | "reset-password" | "scrape" | "domains" | "lists" | "verifier" | "messages" | "smtp" | "maps" | "login" | "signup";
 
 interface HeaderProps {
   view: View;
@@ -79,19 +79,18 @@ export function Header({ view, onNavigate }: HeaderProps) {
     setInstallHint(result === "unavailable");
   };
 
-  const navItem = (label: string, target: View, icon: React.ReactNode) => (
+  const navItem = (label: string, target: View) => (
     <button
       onClick={() => {
         onNavigate(target);
         setMobileOpen(false);
       }}
-      className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+      className={`flex items-center px-3 py-2 rounded-lg font-sans text-sm font-medium transition-colors ${
         view === target
           ? "text-primary-700 bg-primary-50"
           : "text-neutral-600 hover:text-neutral-900 hover:bg-neutral-100"
       }`}
     >
-      {icon}
       {label}
     </button>
   );
@@ -106,31 +105,32 @@ export function Header({ view, onNavigate }: HeaderProps) {
         <div className="flex items-center justify-between h-16">
           <button
             onClick={() => onNavigate(user ? "scrape" : "home")}
-            className="flex items-center gap-2 group"
+            className="flex items-center gap-2"
           >
-            <div className="w-9 h-9 rounded-xl bg-primary-600 flex items-center justify-center group-hover:bg-primary-700 transition-colors">
-              <Mail className="text-white" size={18} />
+            <div className="h-9 w-9 overflow-hidden rounded-xl bg-transparent">
+              <img src="/pwa-icon.svg" alt="" className="h-full w-full object-cover" />
             </div>
-            <span className="font-bold text-lg tracking-tight">MailHarvest</span>
+            <span className="font-sans text-lg font-bold">MailHarvest</span>
           </button>
 
               {user ? (
                 <nav className="hidden xl:flex items-center gap-0.5 whitespace-nowrap">
-                  {navItem("Maps", "maps", <MapPin size={15} />)}
-                  {navItem("Domain Scraping", "domains", <Globe size={15} />)}
-                  {navItem("Email Scraping", "scrape", <Mail size={15} />)}
-                  {navItem("Email Lists", "lists", <Users size={15} />)}
-                  {navItem("Messages", "messages", <FileText size={15} />)}
-                  {navItem("SMTPs", "smtp", <Settings size={15} />)}
-                  {navItem("Credit Balance", "credits", <Coins size={15} />)}
+                  {navItem("Maps", "maps")}
+                  {navItem("Domain Scraping", "domains")}
+                  {navItem("Email Scraping", "scrape")}
+                  {navItem("Email Lists", "lists")}
+                  {navItem("Email Verifier", "verifier")}
+                  {navItem("Messages", "messages")}
+                  {navItem("SMTPs", "smtp")}
+                  {navItem("Credit Balance", "credits")}
                 </nav>
           ) : (
             <nav className="hidden md:flex items-center gap-1">
-              {navItem("Home", "home", <Search size={16} />)}
-              {navItem("About Us", "about", <Info size={16} />)}
-              {navItem("Our Mission", "mission", <Target size={16} />)}
-              {navItem("Our Services", "services", <Globe size={16} />)}
-              {navItem("How It Works", "how-it-works", <FileText size={16} />)}
+              {navItem("Home", "home")}
+              {navItem("About Us", "about")}
+              {navItem("Our Mission", "mission")}
+              {navItem("Our Services", "services")}
+              {navItem("How It Works", "how-it-works")}
             </nav>
           )}
 
@@ -208,21 +208,22 @@ export function Header({ view, onNavigate }: HeaderProps) {
         <div className="xl:hidden border-t border-neutral-200/60 bg-white px-4 py-3 space-y-1 animate-slide-in max-h-[calc(100vh-4rem)] overflow-y-auto">
           {user ? (
             <>
-              {navItem("Maps", "maps", <MapPin size={16} />)}
-              {navItem("Domain Scraping", "domains", <Globe size={16} />)}
-              {navItem("Email Scraping", "scrape", <Mail size={16} />)}
-              {navItem("Email Lists", "lists", <Users size={16} />)}
-              {navItem("Messages", "messages", <FileText size={16} />)}
-              {navItem("SMTPs", "smtp", <Settings size={16} />)}
-              {navItem("Credit Balance", "credits", <Coins size={16} />)}
+              {navItem("Maps", "maps")}
+              {navItem("Domain Scraping", "domains")}
+              {navItem("Email Scraping", "scrape")}
+              {navItem("Email Lists", "lists")}
+              {navItem("Email Verifier", "verifier")}
+              {navItem("Messages", "messages")}
+              {navItem("SMTPs", "smtp")}
+              {navItem("Credit Balance", "credits")}
             </>
           ) : (
             <>
-              {navItem("Home", "home", <Search size={16} />)}
-              {navItem("About Us", "about", <Info size={16} />)}
-              {navItem("Our Mission", "mission", <Target size={16} />)}
-              {navItem("Our Services", "services", <Globe size={16} />)}
-              {navItem("How It Works", "how-it-works", <FileText size={16} />)}
+              {navItem("Home", "home")}
+              {navItem("About Us", "about")}
+              {navItem("Our Mission", "mission")}
+              {navItem("Our Services", "services")}
+              {navItem("How It Works", "how-it-works")}
             </>
           )}
           <div className="px-3 py-1 flex items-center justify-between gap-3">

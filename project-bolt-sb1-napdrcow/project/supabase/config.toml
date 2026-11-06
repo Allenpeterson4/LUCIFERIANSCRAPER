@@ -1,5 +1,5 @@
 [functions.scrape-emails]
-verify_jwt = true
+verify_jwt = false
 
 [functions.parse-domains]
 verify_jwt = true
@@ -12,3 +12,6 @@ verify_jwt = false
 
 [functions.email-reply-webhook]
 verify_jwt = false
+
+[functions.email-verifier]
+verify_jwt = true

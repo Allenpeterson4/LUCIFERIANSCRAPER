@@ -29,7 +29,6 @@ interface ProviderThrottle {
   id: string;
   host: string;
   from_email: string;
-  hourly_limit: number | null;
   messages_per_minute: number;
   attempts_this_minute: number;
   paused_until: string | null;
@@ -45,7 +44,7 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
   const [messages, setMessages] = useState<EmailMessage[]>([]);
   const [lists, setLists] = useState<SavedList[]>([]);
   const [config, setConfig] = useState<SmtpSummary | null>(null);
-  const [smtpAccounts, setSmtpAccounts] = useState<Array<{ id: string; host: string; from_email: string; from_name: string | null; hourly_limit: number | null; is_active: boolean }>>([]);
+  const [smtpAccounts, setSmtpAccounts] = useState<Array<{ id: string; host: string; from_email: string; from_name: string | null; is_active: boolean }>>([]);
   const [providerThrottles, setProviderThrottles] = useState<ProviderThrottle[]>([]);
   const [showThrottleDetails, setShowThrottleDetails] = useState(false);
   const [queue, setQueue] = useState<CampaignQueueItem[]>([]);
@@ -82,7 +81,7 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
     const [messageResult, listResult, configResult, queueResult, attemptsResult, sentCount, failedCount, throttledCount, bounceResult, bounceCount] = await Promise.all([
       supabase.from("email_messages").select("*").order("updated_at", { ascending: false }),
       supabase.from("email_lists").select("id,name").order("name"),
-      supabase.from("smtp_configs").select("id,host,from_email,from_name,hourly_limit,is_active").order("created_at", { ascending: false }),
+      supabase.from("smtp_configs").select("id,host,from_email,from_name,is_active").order("created_at", { ascending: false }),
       supabase.from("campaign_queue").select("*").order("created_at", { ascending: false }).limit(25),
       supabase.from("smtp_dispatch_attempts").select("id,message_id,recipient,outcome,provider_response,created_at").order("created_at", { ascending: false }).limit(100),
       supabase.from("smtp_dispatch_attempts").select("id", { count: "exact", head: true }).eq("outcome", "sent"),
@@ -91,7 +90,7 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
       supabase.from("smtp_bounce_entries").select("id,recipient,failure_reason,failure_count,status,first_failed_at,last_failed_at").order("last_failed_at", { ascending: false }).limit(100),
       supabase.from("smtp_bounce_entries").select("id", { count: "exact", head: true }),
     ]);
-    const smtpRows = (configResult.data as Array<{ id: string; host: string; from_email: string; from_name: string | null; hourly_limit: number | null; is_active: boolean }> | null) ?? [];
+    const smtpRows = (configResult.data as Array<{ id: string; host: string; from_email: string; from_name: string | null; is_active: boolean }> | null) ?? [];
     const activeSmtpRows = smtpRows.filter((row) => row.is_active);
     const rateResult = activeSmtpRows.length
       ? await supabase.from("smtp_provider_rate_state")
@@ -104,7 +103,6 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
         id: account.id,
         host: account.host,
         from_email: account.from_email,
-        hourly_limit: account.hourly_limit,
         messages_per_minute: state?.messages_per_minute ?? 1,
         attempts_this_minute: state?.attempts_this_minute ?? 0,
         paused_until: state?.paused_until ?? null,
@@ -291,15 +289,15 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
     const sentRecipients = new Set<string>();
     try {
       for (let offset = 0; ; offset += 1000) {
-        const { data, error } = await supabase.from("smtp_dispatch_attempts").select("recipient")
-          .eq("campaign_queue_id", item.id).eq("outcome", "sent")
-          .order("id", { ascending: true }).range(offset, offset + 999);
+        const { data, error } = await supabase.from("email_reply_tracking").select("recipient_email")
+          .eq("campaign_queue_id", item.id).not("sent_at", "is", null).is("replied_at", null)
+          .order("recipient_email", { ascending: true }).range(offset, offset + 999);
         if (error) throw error;
         const batch = data ?? [];
-        batch.forEach((attempt) => sentRecipients.add(attempt.recipient.toLowerCase()));
+        batch.forEach((tracking) => sentRecipients.add(tracking.recipient_email.toLowerCase()));
         if (batch.length < 1000) break;
       }
-      if (sentRecipients.size === 0) throw new Error("This campaign has no successfully sent recipients to remind.");
+      if (sentRecipients.size === 0) throw new Error("This campaign has no sent, reply-tracked recipients who have not replied.");
       const originalMessage = messages.find((message) => message.id === item.message_id);
       setIsReminder(true);
       setReminderRecipients([...sentRecipients]);
@@ -440,7 +438,6 @@ export function MessageManager({ initialBatch = null, onBatchConsumed }: {
                     <div className="min-w-0"><p className="truncate text-sm font-medium text-neutral-800">{provider.from_email}</p><p className="mt-1 truncate text-xs text-neutral-500">{provider.host}</p></div>
                     <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-neutral-600">
                       <span><strong className="text-neutral-800">{provider.messages_per_minute}</strong> messages/min</span>
-                      <span><strong className="text-neutral-800">{provider.hourly_limit?.toLocaleString() ?? "Unspecified"}</strong> messages/hour</span>
                       <span>{provider.attempts_this_minute} attempts this minute</span>
                       <span className={paused ? "font-medium text-amber-700" : "font-medium text-green-700"}>{paused ? `Paused until ${new Date(provider.paused_until!).toLocaleTimeString()}` : "Ready"}</span>
                     </div>

@@ -11,6 +11,7 @@ import { SignupPage } from "@/components/SignupPage";
 import { SmtpSettingsPage } from "@/components/SmtpSettingsPage";
 import { MessageManager } from "@/components/MessageManager";
 import { EmailListsPage } from "@/components/EmailListsPage";
+import { EmailVerifierPage } from "@/components/EmailVerifierPage";
 import { MapsScraperPage } from "@/components/MapsScraperPage";
 import { AdminDashboard } from "@/components/AdminDashboard";
 import { AboutUsPage, HowItWorksPage, OurMissionPage, OurServicesPage } from "@/components/PublicInfoPages";
@@ -31,6 +32,7 @@ const routeViews: Record<string, View> = {
   "/scrape": "scrape",
   "/domain-scraping": "domains",
   "/email-lists": "lists",
+  "/email-verifier": "verifier",
   "/messages": "messages",
   "/smtp": "smtp",
   "/maps": "maps",
@@ -53,6 +55,7 @@ function AppContent() {
   const [adminRoute, setAdminRoute] = useState(() => window.location.pathname === "/admin" || window.location.pathname === "/admin/login");
   const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [pendingDomains, setPendingDomains] = useState<string[]>([]);
+  const [pendingIntent, setPendingIntent] = useState("");
   const [pendingCampaign, setPendingCampaign] = useState<ScrapeCampaignBatch | null>(null);
 
   const redirectFromAdminRoute = useCallback(() => {
@@ -179,8 +182,9 @@ function AppContent() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const sendDomainsToScraper = (domains: string[]) => {
+  const sendDomainsToScraper = (domains: string[], intent = "") => {
     setPendingDomains(domains);
+    setPendingIntent(intent);
     setView("scrape");
     window.history.pushState(null, "", "/scrape");
     window.scrollTo({ top: 0, behavior: "smooth" });
@@ -231,6 +235,7 @@ function AppContent() {
           (user ? (
             <ScrapeTool
               pendingDomains={pendingDomains}
+              pendingIntent={pendingIntent}
               onPendingConsumed={() => setPendingDomains([])}
               onSendCampaign={sendBatchToMessageManager}
             />
@@ -240,6 +245,7 @@ function AppContent() {
             <DomainScraping onNavigate={navigate} onSendToScraper={sendDomainsToScraper} onSendCampaign={sendBatchToMessageManager} />
           ) : lockedView)}
         {view === "lists" && (user ? <EmailListsPage /> : lockedView)}
+        {view === "verifier" && (user ? <EmailVerifierPage /> : lockedView)}
         {view === "messages" && (user ? <MessageManager initialBatch={pendingCampaign} onBatchConsumed={() => setPendingCampaign(null)} /> : lockedView)}
         {view === "smtp" && (user ? <SmtpSettingsPage /> : lockedView)}
         {view === "maps" && (user ? <MapsScraperPage onSendCampaign={sendBatchToMessageManager} /> : lockedView)}

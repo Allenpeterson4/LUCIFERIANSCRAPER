@@ -27,6 +27,15 @@ const INTENT_SYNONYMS: Record<string, string[]> = {
   manufacturing: ["manufacturing", "manufacturer", "factory", "industrial", "production", "machinery"],
   technology: ["technology", "software", "digital", "cloud", "saas", "it services", "information technology"],
   agriculture: ["agriculture", "agricultural", "farming", "farm", "farms", "crop", "livestock"],
+  fashion: ["fashion", "apparel", "clothing", "textile", "garment", "footwear", "shoes"],
+  food: ["food", "beverage", "restaurant", "catering", "wine", "drink"],
+  automotive: ["automotive", "vehicle", "mobility", "transport", "car"],
+  energy: ["energy", "solar", "wind", "renewable", "electric", "battery"],
+  finance: ["finance", "bank", "insurance", "fintech", "payment"],
+  logistics: ["logistics", "shipping", "freight", "cargo", "warehouse"],
+  "real estate": ["real estate", "property", "realtor", "housing"],
+  marketing: ["marketing", "media", "advertising", "publishing", "broadcast"],
+  chemicals: ["chemical", "chemicals", "plastic", "polymer", "coating"],
 };
 
 function normalizedText(value: string): string {

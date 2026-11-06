@@ -45,7 +45,7 @@ const LISTING_ELEMENT_MARKERS = /(?:exhibitor|participant|supplier|vendor|seller
 const GENERIC_LINK_LABELS = new Set(["website", "visit", "visit website", "details", "more", "learn more", "view", "click here"]);
 
 const CATEGORY_KEYWORDS: Record<string, string[]> = {
-  "Technology & IT": ["tech", "software", "it", "digital", "cloud", "data", "ai", "cyber", "saas", "app"],
+  "Technology & IT": ["tech", "technology", "software", "it", "digital", "cloud", "data", "ai", "cyber", "saas", "app"],
   "Manufacturing": ["manufact", "factory", "industrial", "production", "machinery", "equipment"],
   "Energy": ["energy", "solar", "wind", "power", "renewable", "electric", "battery"],
   "Healthcare": ["health", "medical", "pharma", "biotech", "clinic", "hospital", "med"],
@@ -211,14 +211,19 @@ interface ListingInspection {
   domains: ExtractedDomain[];
 }
 
-function inferDirectoryIntent(html: string): string {
+function inferDirectoryIntent(html: string, sourceUrl?: URL): string {
   const metadata = [
     html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1],
     html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i)?.[1],
     html.match(/<h1\b[^>]*>([\s\S]*?)<\/h1>/i)?.[1],
   ].filter(Boolean).join(" ").replace(/<[^>]*>/g, " ").toLowerCase();
+  const urlContext = sourceUrl ? `${sourceUrl.hostname} ${sourceUrl.pathname} ${sourceUrl.search}`.toLowerCase() : "";
+  const context = ` ${`${urlContext} ${metadata}`.replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim()} `;
   return Object.entries(CATEGORY_KEYWORDS)
-    .filter(([, keywords]) => keywords.some((keyword) => metadata.includes(keyword)))
+    .filter(([, keywords]) => keywords.some((keyword) => {
+      const normalizedKeyword = ` ${keyword.toLowerCase().replace(/&/g, " and ").replace(/[^a-z0-9]+/g, " ").trim()} `;
+      return context.includes(normalizedKeyword);
+    }))
     .map(([category]) => category)
     .join(" ");
 }
@@ -251,15 +256,15 @@ async function fetchPage(url: URL): Promise<string | null> {
   return await fetchWithTimeout(httpUrl.toString());
 }
 
-async function inspectListing(url: URL, requestedIntent = ""): Promise<ListingInspection | null> {
-  if (!isDesignatedTargetUrl(url)) return null;
+async function inspectListing(url: URL, requestedIntent = "", allowContentDetection = false): Promise<ListingInspection | null> {
+  if (!allowContentDetection && !isDesignatedTargetUrl(url)) return null;
   const html = await fetchPage(url);
   if (!html) return null;
   const listingHtml = stripNonContentHtml(html);
   const sourceType = detectSourceType(listingHtml);
   if (sourceType === "generic") return null;
   const extracted = extractDomainsFromHtml(listingHtml, url.toString(), sourceType);
-  const intent = requestedIntent.trim().slice(0, 200) || inferDirectoryIntent(listingHtml);
+  const intent = requestedIntent.trim().slice(0, 200) || inferDirectoryIntent(listingHtml, url);
   const domains = await filterRelevantCompanies(intent, extracted);
   if (domains.length === 0) return null;
   return { source_url: url.toString(), source_type: sourceType, intent, domains };
@@ -267,17 +272,26 @@ async function inspectListing(url: URL, requestedIntent = ""): Promise<ListingIn
 
 async function locateDirectories(inputUrl: URL, intent: string): Promise<ListingInspection[]> {
   const candidates = new Map<string, URL>();
+  const inferredIntent = intent || inferDirectoryIntent("", inputUrl);
+  let directInspection: ListingInspection | null = null;
   if (isDesignatedTargetUrl(inputUrl)) {
     inputUrl.hash = "";
     candidates.set(inputUrl.toString(), inputUrl);
   } else {
     const siteUrl = new URL("/", inputUrl.origin);
-    const homepageHtml = await fetchPage(siteUrl);
-    if (homepageHtml) {
-      for (const link of findDirectoryLinks(stripNonContentHtml(homepageHtml), siteUrl)) {
+    const discoveryPages = new Map([[siteUrl.toString(), siteUrl]]);
+    if (inputUrl.pathname !== "/") discoveryPages.set(inputUrl.toString(), inputUrl);
+    const discoveryResults = await Promise.all(Array.from(discoveryPages.values()).map(async (page) => ({
+      page,
+      html: await fetchPage(page),
+    })));
+    for (const { page, html } of discoveryResults) {
+      if (!html) continue;
+      for (const link of findDirectoryLinks(stripNonContentHtml(html), page)) {
         candidates.set(link.toString(), link);
       }
     }
+    if (inputUrl.pathname !== "/") directInspection = await inspectListing(inputUrl, inferredIntent, true);
 
     const knownPaths = [
       "/exhibitors", "/exhibitor-list", "/exhibitor-directory", "/participants",
@@ -292,9 +306,10 @@ async function locateDirectories(inputUrl: URL, intent: string): Promise<Listing
   }
 
   const inspections = await Promise.all(
-    Array.from(candidates.values()).slice(0, 16).map((candidate) => inspectListing(candidate, intent))
+    Array.from(candidates.values()).slice(0, 16).map((candidate) => inspectListing(candidate, inferredIntent))
   );
-  return inspections.filter((inspection): inspection is ListingInspection => inspection !== null)
+  return [...(directInspection ? [directInspection] : []), ...inspections]
+    .filter((inspection): inspection is ListingInspection => inspection !== null)
     .sort((left, right) => right.domains.length - left.domains.length);
 }
 

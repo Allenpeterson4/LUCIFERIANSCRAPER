@@ -14,7 +14,7 @@ import {
   Inbox,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
-import { scrapeDomains, type ScrapeResponseData } from "@/lib/scrape";
+import { scrapeDomains, waitForScrapeRun, type ScrapeResponseData } from "@/lib/scrape";
 import { HistoryView } from "@/components/HistoryView";
 import { KeywordSearchPanel } from "@/components/KeywordSearchPanel";
 import type { CompanyRecord, ScrapeCampaignBatch } from "@/lib/types";
@@ -28,17 +28,28 @@ interface DomainResult extends CompanyRecord {
 
 interface ScrapeToolProps {
   pendingDomains?: string[];
+  pendingIntent?: string;
   onPendingConsumed?: () => void;
   onSendCampaign?: (batch: ScrapeCampaignBatch) => void;
 }
 
-export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }: ScrapeToolProps) {
+function domainKey(value: string) {
+  try {
+    const url = new URL(/^https?:\/\//i.test(value) ? value : `https://${value}`);
+    return url.hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return value.trim().toLowerCase();
+  }
+}
+
+export function ScrapeTool({ pendingDomains, pendingIntent, onPendingConsumed, onSendCampaign }: ScrapeToolProps) {
   const { session } = useAuth();
   const [activeTab, setActiveTab] = useState<"single" | "bulk" | "history">("single");
   const [singleDomain, setSingleDomain] = useState("");
   const [bulkInput, setBulkInput] = useState("");
-  const [businessFocus, setBusinessFocus] = useState("");
+  const [automaticIntent, setAutomaticIntent] = useState("");
   const [loading, setLoading] = useState(false);
+  const [progress, setProgress] = useState<{ current: number; completed: number; total: number; domain: string; phase: "queued" | "processing" | "completed" } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [results, setResults] = useState<DomainResult[] | null>(null);
   const [totalEmails, setTotalEmails] = useState(0);
@@ -48,18 +59,27 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
     if (pendingDomains && pendingDomains.length > 0) {
       setActiveTab("bulk");
       setBulkInput(pendingDomains.join("\n"));
+      setAutomaticIntent(pendingIntent ?? "");
       onPendingConsumed?.();
     }
-  }, [pendingDomains, onPendingConsumed]);
+  }, [pendingDomains, pendingIntent, onPendingConsumed]);
 
   const parseDomains = (): string[] => {
-    if (activeTab === "single") {
-      return [singleDomain];
-    }
-    return bulkInput
-      .split(/[\n,\s]+/)
+    const submitted = activeTab === "single"
+      ? [singleDomain]
+      : bulkInput
+        .replace(/(?=https?:\/\/)/gi, "\n")
+        .split(/[\n,;\s]+/);
+    const seen = new Set<string>();
+    return submitted
       .map((d) => d.trim())
-      .filter(Boolean);
+      .filter((domain) => {
+        if (!domain) return false;
+        const key = domainKey(domain);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
   };
 
   const handleScrape = async () => {
@@ -70,23 +90,35 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
     }
     setError(null);
     setLoading(true);
+    setProgress(null);
     setResults(null);
     setTotalEmails(0);
 
+    const batchLabel = domains.length > 1 ? `Bulk Domains ${new Date().toISOString()}` : undefined;
     try {
-      const data: ScrapeResponseData = await scrapeDomains(
-        domains,
-        session!.access_token,
-        { intent: businessFocus.trim() || undefined }
-      );
-      setResults(data.results);
-      setTotalEmails(data.total_emails);
-      setExpanded(new Set(data.results.map((r) => r.domain)));
+      if (!session) throw new Error("Sign in to start a scrape batch.");
+      const queued = await scrapeDomains(domains, session.access_token, {
+        intent: automaticIntent || undefined,
+        sourceQuery: batchLabel,
+        batchLabel,
+      });
       window.dispatchEvent(new Event("credits-updated"));
+      setProgress({ current: 1, completed: 0, total: queued.total_domains, domain: domains[0], phase: "queued" });
+      const data: ScrapeResponseData = await waitForScrapeRun(
+        queued.run_id,
+        queued.total_domains,
+        queued.source_type,
+        setProgress,
+      );
+      const collectedResults = data.results as DomainResult[];
+      setResults(collectedResults);
+      setTotalEmails(data.total_emails);
+      setExpanded(new Set(collectedResults.map((result) => result.domain)));
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Scraping failed.");
+      setError(err instanceof Error ? err.message : "Could not queue or load the scrape batch.");
     } finally {
       setLoading(false);
+      setProgress(null);
     }
   };
 
@@ -120,6 +152,10 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
   };
 
   const totalDomains = results?.length ?? 0;
+  const successfulDomains = results?.filter((result) => result.status === "completed" && result.emails.length > 0).length ?? 0;
+  const noEmailDomains = results?.filter((result) => result.status === "no_emails").length ?? 0;
+  const notRelevantDomains = results?.filter((result) => result.status === "not_relevant").length ?? 0;
+  const failedDomains = results?.filter((result) => result.status === "failed").length ?? 0;
 
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-10 animate-fade-in">
@@ -163,10 +199,6 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
 
       {/* Input */}
       {activeTab !== "history" && <div className="bg-white rounded-2xl border border-neutral-200 p-6 mb-6">
-        <label className="mb-5 block text-sm font-medium text-neutral-700">
-          Business focus <span className="font-normal text-neutral-400">(optional)</span>
-          <input value={businessFocus} onChange={(event) => setBusinessFocus(event.target.value)} maxLength={200} placeholder="e.g. construction companies or educational institutes" className="mt-1.5 w-full px-4 py-2.5 rounded-lg border border-neutral-200 focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none text-sm" />
-        </label>
         {activeTab === "single" ? (
           <div>
             <label className="block text-sm font-medium text-neutral-700 mb-2">
@@ -181,7 +213,7 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
                 <input
                   type="text"
                   value={singleDomain}
-                  onChange={(e) => setSingleDomain(e.target.value)}
+                  onChange={(e) => { setSingleDomain(e.target.value); setAutomaticIntent(""); }}
                   onKeyDown={(e) => e.key === "Enter" && !loading && handleScrape()}
                   placeholder="example.com"
                   className="w-full pl-10 pr-4 py-3 rounded-lg border border-neutral-200 focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none transition-all font-mono text-sm"
@@ -208,18 +240,20 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
             </label>
             <textarea
               value={bulkInput}
-              onChange={(e) => setBulkInput(e.target.value)}
-              placeholder={"example.com\nanother.org\nthird-company.co"}
+              onChange={(e) => { setBulkInput(e.target.value); setAutomaticIntent(""); }}
+              placeholder={"Paste domains here, for example:\nexample.com\nanother.org third-company.co"}
               rows={7}
               className="w-full px-4 py-3 rounded-lg border border-neutral-200 focus:border-primary-500 focus:ring-2 focus:ring-primary-100 outline-none transition-all font-mono text-sm resize-y"
             />
             <div className="flex items-center justify-between mt-3">
               <span className="text-sm text-neutral-400">
-                {parseDomains().length} domain{parseDomains().length !== 1 ? "s" : ""} detected
+                {parseDomains().length === 0
+                  ? "Paste domains to begin"
+                  : `${parseDomains().length} unique domain${parseDomains().length !== 1 ? "s" : ""} detected`}
               </span>
               <button
                 onClick={handleScrape}
-                disabled={loading}
+                disabled={loading || parseDomains().length === 0}
                 className="flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-60 text-white font-medium px-6 py-3 rounded-lg transition-colors"
               >
                 {loading ? (
@@ -248,8 +282,9 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
       {loading && activeTab !== "history" && (
         <div className="bg-white rounded-2xl border border-neutral-200 p-10 text-center animate-fade-in">
           <Loader2 size={36} className="animate-spin text-primary-600 mx-auto mb-4" />
-          <p className="font-medium text-neutral-700">Crawling domains and extracting emails...</p>
-          <p className="text-sm text-neutral-400 mt-1">This usually takes a few seconds per domain.</p>
+          <p className="font-medium text-neutral-700">{progress ? `${progress.phase === "completed" ? "Completed" : progress.phase === "queued" ? "Queued" : "Processing"} ${progress.current} of ${progress.total}${progress.domain ? `: ${progress.domain}` : ""}` : "Starting domain queue..."}</p>
+          <div className="mx-auto mt-4 h-2 max-w-md overflow-hidden rounded-full bg-neutral-100"><div className="h-full bg-primary-600 transition-[width] duration-300" style={{ width: `${progress?.total ? Math.round(progress.completed / progress.total * 100) : 0}%` }} /></div>
+          <p className="mt-2 text-sm text-neutral-400">{progress ? `${progress.completed} of ${progress.total} domains complete` : "Preparing the batch..."}</p>
         </div>
       )}
 
@@ -276,6 +311,12 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
             </button>
           </div>
 
+          <section aria-label="Batch result summary" className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {[["Successful", successfulDomains, "text-green-700"], ["No emails", noEmailDomains, "text-neutral-700"], ["Not relevant", notRelevantDomains, "text-amber-700"], ["Failed or invalid", failedDomains, "text-red-700"]].map(([label, count, color]) => <div key={label} className="rounded-lg border border-neutral-200 bg-white p-4">
+              <p className="text-xs text-neutral-500">{label}</p><p className={`mt-1 text-xl font-semibold ${color}`}>{Number(count).toLocaleString()}</p>
+            </div>)}
+          </section>
+
           {results.length === 0 ? (
             <div className="bg-white rounded-2xl border border-neutral-200 p-10 text-center">
               <Inbox size={36} className="text-neutral-300 mx-auto mb-3" />
@@ -301,16 +342,8 @@ export function ScrapeTool({ pendingDomains, onPendingConsumed, onSendCampaign }
                     <span className="block truncate font-medium text-neutral-800">{r.business_name}</span>
                     <span className="block truncate font-mono text-xs text-neutral-500">{r.domain}</span>
                   </span>
-                  <span
-                    className={`text-xs font-medium px-2.5 py-1 rounded-full ${
-                      r.status === "completed"
-                        ? "bg-accent-50 text-accent-700"
-                        : r.status === "no_emails"
-                        ? "bg-neutral-100 text-neutral-500"
-                        : "bg-red-50 text-red-600"
-                    }`}
-                  >
-                    {r.emails.length} email{r.emails.length !== 1 ? "s" : ""}
+                  <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${r.status === "completed" && r.emails.length > 0 ? "bg-accent-50 text-accent-700" : r.status === "failed" ? "bg-red-50 text-red-600" : r.status === "not_relevant" ? "bg-amber-50 text-amber-700" : "bg-neutral-100 text-neutral-500"}`}>
+                    {r.status === "failed" ? "Failed" : r.status === "not_relevant" ? "Not relevant" : r.status === "no_emails" ? "No emails" : `${r.emails.length} email${r.emails.length !== 1 ? "s" : ""}`}
                   </span>
                   <span className="text-xs text-neutral-400 hidden sm:flex items-center gap-1">
                     <FileText size={13} />
